@@ -1,0 +1,170 @@
+# Copyright (c) 2024, NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import glob
+
+import cudf
+import cupy
+import dask_cudf
+import pytest
+from legate.core import get_legate_runtime
+
+from legate_dataframe import LogicalTable
+from legate_dataframe.lib.csv import csv_read, csv_write
+from legate_dataframe.testing import assert_frame_equal, std_dataframe_set
+
+
+@pytest.mark.parametrize("df", std_dataframe_set())
+def test_write(tmp_path, df):
+    tbl = LogicalTable.from_cudf(df)
+
+    csv_write(tbl, path=tmp_path)
+    get_legate_runtime().issue_execution_fence(block=True)
+
+    res = (
+        dask_cudf.read_csv(str(tmp_path) + "/*.csv", dtype=list(df.dtypes))
+        .compute()
+        .reset_index(drop=True)
+    )
+    assert_frame_equal(res, df)
+
+
+@pytest.mark.parametrize("df", std_dataframe_set())
+def test_read(tmp_path, df, npartitions=2):
+    filenames = str(tmp_path) + "/*.csv"
+    ddf = dask_cudf.from_cudf(df, npartitions=npartitions)
+    ddf.to_csv(filenames, index=False)
+    tbl = csv_read(filenames, dtypes=df.dtypes)
+    assert_frame_equal(tbl, df)
+
+
+def test_read_single_rows(tmp_path):
+    filenames = str(tmp_path) + "/*.csv"
+    df = cudf.DataFrame({"a": cupy.arange(1, dtype="int64")})
+    ddf = dask_cudf.from_cudf(df, npartitions=1)
+    ddf.to_csv(filenames, index=False)
+    tbl = csv_read(filenames, dtypes=df.dtypes)
+    assert_frame_equal(tbl, df)
+
+
+def test_read_many_files_per_rank(tmp_path):
+    # Use uneven number to test splitting
+    filenames = str(tmp_path) + "/*.csv"
+    df = cudf.DataFrame({"a": cupy.arange(983, dtype="int64")})
+    npartitions = 100
+    ddf = dask_cudf.from_cudf(df, npartitions=npartitions)
+    ddf.to_csv(filenames, index=False)
+    # Test that we really have many files hoped for:
+    assert len(glob.glob(filenames)) == npartitions
+    tbl = csv_read(filenames, dtypes=df.dtypes)
+
+    # NOTE: Right now the C-code does not attempt to "natural" sort csv
+    #       files.  So more with more than 10 files the order of rows is not
+    #       preserved at this time.
+    assert_frame_equal(tbl.to_cudf().sort_values(by="a"), df)
+
+
+@pytest.mark.parametrize("delimiter", [",", "|"])
+def test_readwrite_dates(tmp_path, delimiter):
+    df = cudf.DataFrame(
+        {"a": ["2010-06-19T13:15", "2011-06-19T13:25", "2010-07-19T13:35"]}
+    ).astype("datetime64[ns]")
+
+    tbl = LogicalTable.from_cudf(df)
+    csv_write(tbl, tmp_path, delimiter=delimiter)
+    get_legate_runtime().issue_execution_fence(block=True)
+
+    read_tbl = csv_read(
+        str(tmp_path) + "/*", dtypes=["datetime64[ns]"], delimiter=delimiter
+    )
+
+    assert_frame_equal(read_tbl, df)
+
+
+def test_trailing_nulls(tmp_path):
+    # If we read a large file where a chunk (or all) of rows end in nulls
+    # then csv may not be clear about the number of columns contained, so
+    # test that we ensure the correct number:
+    df = cudf.DataFrame(
+        {"a": list(range(100)), "b": cudf.Series([None] * 100, dtype="int64")}
+    )
+
+    df.to_csv(tmp_path / "tmp.csv", index=False)
+
+    read_tbl = csv_read(str(tmp_path) + "/*", dtypes=["int64", "int64"])
+    assert_frame_equal(read_tbl, df)
+
+
+def test_wrong_number_of_dtypes(tmp_path):
+    df = cudf.DataFrame({"a": [1, 2, 3, 4]})
+    df.to_csv(tmp_path / "tmp.csv", index=False)
+    with pytest.raises(ValueError, match="number of columns in csv"):
+        csv_read(str(tmp_path) + "/*", dtypes=["int64", "int64"])
+
+
+def test_usecols(tmp_path):
+    df = cudf.DataFrame({"a": [0, 1, 2], "b": [1, 2, 3], "c": [2, 3, 4]})
+    df.to_csv(tmp_path / "tmp.csv", index=False)
+
+    with pytest.raises(ValueError, match="usecols and dtypes must"):
+        csv_read(str(tmp_path) + "/*", dtypes=["int64", "int64"], usecols=["a"])
+
+    with pytest.raises(ValueError, match="column 'bad-name' not found"):
+        csv_read(str(tmp_path) + "/*", dtypes=["int64"], usecols=["bad-name"])
+
+    read_tbl = csv_read(
+        str(tmp_path) + "/*", dtypes=["int64", "float64"], usecols=["b", "c"]
+    )
+    assert_frame_equal(read_tbl, df[["b", "c"]].astype({"c": "float64"}))
+
+    read_tbl = csv_read(
+        str(tmp_path) + "/*", dtypes=["int64", "float64"], usecols=["c", "b"]
+    )
+    assert_frame_equal(read_tbl, df[["b", "c"]].astype({"b": "float64"}))
+
+
+def test_na_filter_false(tmp_path):
+    df = cudf.DataFrame({"a": [1, 2, 3, 4]})
+    df.to_csv(tmp_path / "tmp.csv", index=False)
+    read_tbl = csv_read(str(tmp_path) + "/*", dtypes=["int64"], na_filter=False)
+    # NA filter does (currently) not mean that the column isn't set nullable:
+    # assert not read_tbl["a"].to_cudf().nullable
+    assert_frame_equal(read_tbl, df)
+
+    # And it fails if we try do not allow nulls.
+    df = cudf.DataFrame(
+        {
+            "a": cudf.Series([None, 1, 2, None, None], dtype="int64"),
+            "b": cudf.Series([None, 1, 3, 4, None], dtype="int64"),
+        }
+    )
+    df.to_csv(tmp_path / "tmp.csv", index=False)
+
+    # Cudf reads empty integer columns as 0 with na_filter=False
+    read_tbl = csv_read(
+        str(tmp_path) + "/*", dtypes=["int64", "int64"], na_filter=False
+    ).to_cudf()
+    assert_frame_equal(read_tbl, df.fillna(0))
+
+
+@pytest.mark.parametrize("offset", [1, 2, 3])
+def test_num_rows_split(tmp_path, offset):
+    # Sanity check that file splitting boundaries work correctly.
+    # We use a different number of bytes for a so that the two runs must split
+    # at one byte different boundaries w.r.t. the rows containing "1\n".
+    with open(tmp_path / "tmp.csv", "w") as f:
+        f.write("a" * offset + "\n1" * 1000)
+
+    read_tbl = csv_read(str(tmp_path) + "/*", dtypes=["int64"])
+    assert read_tbl.num_rows() == 1000

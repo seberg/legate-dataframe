@@ -1,0 +1,11 @@
+cpp/build/
+ci/manual-ci-test.py
+Docker
+python/_skbuild
+python/*.egg-info
+.pytest_cache
+.mypy_cache
+.git
+.cache
+.vscode
+.ruff_cache

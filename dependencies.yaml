@@ -1,0 +1,230 @@
+# Dependency list for https://github.com/rapidsai/dependency-file-generator
+files:
+  all:
+    output: conda
+    matrix:
+      cuda: ["12.4"]
+      arch: [x86_64]
+    includes:
+      - build
+      - cuda
+      - cuda_version
+      - depends_on_cudf
+      - depends_on_cupy
+      - depends_on_legate
+      - depends_on_libcudf
+      - depends_on_librmm
+      - docs
+      - py_version
+      - run
+      - test
+  test:
+    output: none
+    includes:
+      - depends_on_cupy
+      - py_version
+      - test
+  docs:
+    output: none
+    includes:
+      - py_version
+      - docs
+  py_build:
+    output: pyproject
+    pyproject_dir: python
+    extras:
+      table: build-system
+    includes:
+      - build
+      - depends_on_legate
+      - depends_on_libcudf
+  py_run:
+    output: pyproject
+    pyproject_dir: python
+    extras:
+      table: project
+    includes:
+      - depends_on_cudf
+      - depends_on_legate
+      - run
+  py_test:
+    output: pyproject
+    pyproject_dir: python
+    extras:
+      table: project.optional-dependencies
+      key: test
+    includes:
+      - test
+channels:
+  - rapidsai
+  - legate
+  - legate/label/experimental
+  - conda-forge
+  - nvidia
+dependencies:
+  build:
+    common:
+      - output_types: [conda, requirements, pyproject]
+        packages:
+          - cmake>=3.26.4,!=3.30.0
+          - cython>=3.0.0
+          - ninja
+          - scikit-build>=0.18.0
+          - setuptools>=70.0
+      - output_types: [conda]
+        packages:
+          - c-compiler
+          - cxx-compiler
+          - make
+    specific:
+      - output_types: conda
+        matrices:
+          - matrix:
+              arch: x86_64
+            packages:
+              - gcc_linux-64=11.*
+              - sysroot_linux-64==2.17
+      - output_types: conda
+        matrices:
+          - matrix:
+              cuda: "12.*"
+            packages:
+              - cuda-nvcc
+
+  cuda_version:
+    specific:
+      - output_types: conda
+        matrices:
+          - matrix:
+              cuda: "12.4"
+            packages:
+              - cuda-version=12.4
+
+  cuda:
+    specific:
+      - output_types: conda
+        matrices:
+          - matrix:
+              cuda: "12.*"
+            packages:
+              - cuda-nvtx-dev
+              - cuda-cudart-dev
+              - cuda-profiler-api
+              - cuda-nvrtc-dev
+
+  py_version:
+    specific:
+      - output_types: conda
+        matrices:
+          - matrix:
+              py: "3.10"
+            packages:
+              - python=3.10
+          - matrix:
+              py: "3.11"
+            packages:
+              - python=3.11
+          - matrix:
+              py: "3.12"
+            packages:
+              - python=3.12
+          - matrix:
+            packages:
+              - python>=3.10,<3.13
+
+  docs:
+    common:
+      - output_types: [conda, pyproject, requirements]
+        packages:
+          - myst-parser>=4.0
+          - pydata-sphinx-theme>=0.16.0
+          - sphinx>=8.0
+      - output_types: [conda]
+        packages:
+          - make
+
+  run:
+    common:
+      - output_types: [conda, pyproject, requirements]
+        packages:
+          - numpy >=1.23,<3.0.0a0
+
+  test:
+    common:
+      - output_types: [conda, requirements, pyproject]
+        packages:
+          - cunumeric==25.01.*,>=0.0.0.dev0
+          - pytest>=7.0
+          - dask-cuda==24.08.*
+          - dask-cudf==24.08.*
+      - output_types: conda
+        packages:
+          - cuda-sanitizer-api
+          - openssh  # for dask
+          - valgrind
+
+  depends_on_cudf:
+    common:
+      - output_types: conda
+        packages:
+          - &cudf_unsuffixed cudf==24.08.*,>=0.0.0a0
+    specific:
+      - output_types: [requirements, pyproject]
+        matrices:
+          - matrix:
+              cuda: "12.*"
+              cuda_suffixed: "true"
+            packages:
+              - cudf-cu12==24.08.*,>=0.0.0a0
+          - {matrix: null, packages: [*cudf_unsuffixed]}
+
+  depends_on_cupy:
+    common:
+      - output_types: conda
+        packages:
+          - cupy>=12.0.0
+    specific:
+      - output_types: [requirements, pyproject]
+        matrices:
+          - matrix: {cuda: "12.*"}
+            packages: &cupy_packages_cu12
+              - cupy-cuda12x>=12.0.0
+          - {matrix: null, packages: *cupy_packages_cu12}
+
+  depends_on_legate:
+    common:
+      - output_types: [conda, pyproject, requirements]
+        packages:
+          - legate==25.01.*,>=0.0.0.dev0
+
+  depends_on_libcudf:
+    common:
+      - output_types: conda
+        packages:
+          - &libcudf_unsuffixed libcudf==24.08.*,>=0.0.0a0
+    specific:
+      - output_types: [requirements, pyproject]
+        matrices:
+          - matrix:
+              cuda: "12.*"
+              cuda_suffixed: "true"
+            packages:
+              - libcudf-cu12==24.08.*,>=0.0.0a0
+          - {matrix: null, packages: [*libcudf_unsuffixed]}
+
+  depends_on_librmm:
+    common:
+      - output_types: conda
+        packages:
+          - &librmm_unsuffixed librmm==24.08.*,>=0.0.0a0
+    specific:
+      - output_types: [requirements, pyproject]
+        matrices:
+          - matrix:
+              cuda: "12.*"
+              cuda_suffixed: "true"
+            packages:
+              - librmm-cu12==24.08.*,>=0.0.0a0
+          - matrix:
+            packages:
+              - *librmm_unsuffixed

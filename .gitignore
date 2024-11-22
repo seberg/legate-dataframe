@@ -1,0 +1,17 @@
+*.*~
+build
+_skbuild
+record.txt
+*.so
+dask-worker-space
+__pycache__
+.cache
+*.egg-info
+.vscode
+legate_dataframe/install_info.py
+cufile.log
+docs/build/
+cpp/doxygen/html/
+.mypy_cache
+.hypothesis
+.ruff_cache

@@ -1,0 +1,46 @@
+
+{
+   NCCL Setup
+   Memcheck:Cond
+   fun:*p2pSendSetup*
+   ...
+   fun:start_thread
+   fun:clone
+}
+{
+   NCCL Setup
+   Memcheck:Cond
+   ...
+   fun:*ncclTransportP2pSetup*
+   ...
+   fun:start_thread
+   fun:clone
+}
+{
+   NCCL Setup
+   Memcheck:Cond
+   ...
+   fun:proxyConnInit
+   ...
+   fun:start_thread
+   fun:clone
+}
+{
+   NCCL Setup
+   Memcheck:Cond
+   ...
+   fun:*ncclCommInit*
+   ...
+   fun:start_thread
+   fun:clone
+}
+{
+   NCCL Setup
+   Memcheck:Param
+   socketcall.sendto(msg)
+   ...
+   fun:*ncclCommInit*
+   ...
+   fun:start_thread
+   fun:clone
+}
