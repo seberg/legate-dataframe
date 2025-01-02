@@ -198,7 +198,7 @@ dependencies:
             packages:
               - cudf-cu12==24.10.*,>=0.0.0a0
               - pylibcudf-cu12==24.10.*,>=0.0.0a0
-          - {matrix: null, packages: [*cudf_unsuffixed]}
+          - {matrix: null, packages: [*cudf_unsuffixed, *pylibcudf_unsuffixed]}
 
   depends_on_cupy:
     common:
