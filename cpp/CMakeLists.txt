@@ -68,26 +68,6 @@ rapids_find_package(
 include(cmake/Modules/ConfigureCUDA.cmake) # set other CUDA compilation flags
 
 # ##################################################################################################
-# * dependencies ----------------------------------------------------------------------------------
-
-rapids_find_package(
-  legate REQUIRED Legion LegionRuntime
-  BUILD_EXPORT_SET LegateDataframe-exports
-  INSTALL_EXPORT_SET LegateDataframe-exports
-)
-
-# add third party dependencies using CPM
-rapids_cpm_init()
-
-include(cmake/thirdparty/get_rmm.cmake)
-include(cmake/thirdparty/get_cudf.cmake)
-
-if(LegateDataframe_BUILD_TESTS)
-  # find or install GoogleTest
-  include(cmake/thirdparty/get_gtest.cmake)
-endif()
-
-# ##################################################################################################
 # * library targets -------------------------------------------------------------------------------
 
 file(GLOB SOURCES "src/*.cpp" "src/*.cu" "src/core/*.cpp" "src/core/*.cu")
@@ -114,6 +94,29 @@ target_include_directories(
   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   INTERFACE "$<INSTALL_INTERFACE:include>"
 )
+
+# ##################################################################################################
+# * dependencies ----------------------------------------------------------------------------------
+
+rapids_find_package(
+  legate REQUIRED Legion LegionRuntime
+  BUILD_EXPORT_SET LegateDataframe-exports
+  INSTALL_EXPORT_SET LegateDataframe-exports
+)
+
+# add third party dependencies using CPM
+rapids_cpm_init()
+
+include(cmake/thirdparty/get_rmm.cmake)
+include(cmake/thirdparty/get_cudf.cmake)
+
+if(LegateDataframe_BUILD_TESTS)
+  # find or install GoogleTest
+  include(cmake/thirdparty/get_gtest.cmake)
+endif()
+
+# ##################################################################################################
+# * link dependencies------------------------------------------------------------------------------
 
 target_link_libraries(LegateDataframe PUBLIC legate::legate rmm::rmm cudf::cudf)
 
