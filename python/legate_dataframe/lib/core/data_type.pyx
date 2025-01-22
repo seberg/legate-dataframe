@@ -15,7 +15,7 @@ from cudf._lib.types import PYLIBCUDF_TO_SUPPORTED_NUMPY_TYPES, dtype_to_pylibcu
 from numpy.typing import DTypeLike
 
 
-cdef cpp_cudf_type as_data_type(data_type_like: DTypeLike):
+cdef cpp_cudf_type as_data_type(data_type_like: DTypeLike | pylibcudf.types.Type):
     """Get data type from object
 
     Parameters
