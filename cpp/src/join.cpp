@@ -152,24 +152,6 @@ std::unique_ptr<cudf::table> no_rows_table_like(const PhysicalTable& other)
 }
 
 /**
- * @brief Help function to "revert" a broadcasted table
- *
- * The table is passed through on rank 0 and on the other ranks, an empty table is returned.
- * The `owners` argument is used to keep new cudf allocations alive
- */
-cudf::table_view revert_broadcast(GPUTaskContext& ctx,
-                                  const PhysicalTable& table,
-                                  std::vector<std::unique_ptr<cudf::table>>& owners)
-{
-  if (ctx.rank == 0 || !table.is_broadcasted()) {
-    return table.table_view();
-  } else {
-    owners.push_back(no_rows_table_like(table));
-    return owners.back()->view();
-  }
-}
-
-/**
  * @brief Help function to determine if we need to repartition the tables
  *
  * If legate broadcast the left- or right-hand side table, we might not need to
@@ -205,21 +187,17 @@ class JoinTask : public Task<JoinTask, OpCode::Join> {
   static void gpu_variant(legate::TaskContext context)
   {
     GPUTaskContext ctx{context};
-    const auto lhs          = argument::get_next_input<PhysicalTable>(ctx);
-    const auto rhs          = argument::get_next_input<PhysicalTable>(ctx);
-    const auto lhs_keys     = argument::get_next_scalar_vector<int32_t>(ctx);
-    const auto rhs_keys     = argument::get_next_scalar_vector<int32_t>(ctx);
-    auto join_type          = argument::get_next_scalar<JoinType>(ctx);
-    auto null_equality      = argument::get_next_scalar<cudf::null_equality>(ctx);
-    const auto lhs_out_cols = argument::get_next_scalar_vector<int32_t>(ctx);
-    const auto rhs_out_cols = argument::get_next_scalar_vector<int32_t>(ctx);
-    auto output             = argument::get_next_output<PhysicalTable>(ctx);
-
-    const bool lhs_broadcasted = lhs.is_broadcasted();
-    const bool rhs_broadcasted = rhs.is_broadcasted();
-    if (lhs_broadcasted && rhs_broadcasted) {
-      throw std::runtime_error("join(): cannot have both the lhs and the rhs broadcasted");
-    }
+    const auto lhs             = argument::get_next_input<PhysicalTable>(ctx);
+    const auto rhs             = argument::get_next_input<PhysicalTable>(ctx);
+    const auto lhs_keys        = argument::get_next_scalar_vector<int32_t>(ctx);
+    const auto rhs_keys        = argument::get_next_scalar_vector<int32_t>(ctx);
+    auto join_type             = argument::get_next_scalar<JoinType>(ctx);
+    auto null_equality         = argument::get_next_scalar<cudf::null_equality>(ctx);
+    const auto lhs_out_cols    = argument::get_next_scalar_vector<int32_t>(ctx);
+    const auto rhs_out_cols    = argument::get_next_scalar_vector<int32_t>(ctx);
+    const auto lhs_broadcasted = argument::get_next_scalar<bool>(ctx);
+    const auto rhs_broadcasted = argument::get_next_scalar<bool>(ctx);
+    auto output                = argument::get_next_output<PhysicalTable>(ctx);
 
     if (is_repartition_not_needed(ctx, join_type, lhs_broadcasted, rhs_broadcasted)) {
       cudf_join_and_gather(ctx,
@@ -237,8 +215,8 @@ class JoinTask : public Task<JoinTask, OpCode::Join> {
 
       // All-to-all repartition to one hash bucket per rank. Matching rows from
       // both tables then guaranteed to be on the same rank.
-      auto cudf_lhs = repartition_by_hash(ctx, revert_broadcast(ctx, lhs, owners), lhs_keys);
-      auto cudf_rhs = repartition_by_hash(ctx, revert_broadcast(ctx, rhs, owners), rhs_keys);
+      auto cudf_lhs = repartition_by_hash(ctx, lhs.table_view(), lhs_keys);
+      auto cudf_rhs = repartition_by_hash(ctx, rhs.table_view(), rhs_keys);
 
       auto lhs_view = cudf_lhs->view();  // cudf_lhs unique pointer is moved.
       cudf_join_and_gather(ctx,
@@ -346,7 +324,10 @@ LogicalTable join(const LogicalTable& lhs,
     task, std::vector<int32_t>(lhs_out_columns.begin(), lhs_out_columns.end()));
   argument::add_next_scalar_vector(
     task, std::vector<int32_t>(rhs_out_columns.begin(), rhs_out_columns.end()));
+  argument::add_next_scalar(task, broadcast == BroadcastInput::LEFT);
+  argument::add_next_scalar(task, broadcast == BroadcastInput::RIGHT);
   argument::add_next_output(task, ret);
+
   if (broadcast == BroadcastInput::AUTO) {
     task.add_communicator("nccl");
   } else if (join_type == JoinType::FULL ||

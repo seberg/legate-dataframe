@@ -313,19 +313,6 @@ class PhysicalTable {
 
  public:
   /**
-   * @brief Indicates whether the table has been broadcasted or not
-   *
-   * Legate may broadcast small input data such that each task in a parallel launch gets the same
-   * copy of the data.
-   *
-   * @throw std::runtime_error if the table is unbound.
-   * @throw std::runtime_error if some columns are broadcasted and some are not.
-   * @return true The table has been broadcasted to all parallel tasks
-   * @return false The table is distributed between parallel tasks as usual
-   */
-  [[nodiscard]] bool is_broadcasted() const;
-
-  /**
    * @brief Returns the number of columns
    *
    * @return The number of columns

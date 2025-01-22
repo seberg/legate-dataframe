@@ -276,18 +276,6 @@ class PhysicalColumn {
   }
 
   /**
-   * @brief Indicates whether the column has been broadcasted or not
-   *
-   * Legate may broadcast small input data such that each task in a parallel launch gets the same
-   * copy of the data.
-   *
-   * @throw std::runtime_error if column is unbound.
-   * @return true The column has been broadcasted to all parallel tasks
-   * @return false The column is distributed between parallel tasks as usual
-   */
-  [[nodiscard]] bool is_broadcasted() const;
-
-  /**
    * @brief Get the data type of the underlying logical array
    *
    * @return The legate data type
@@ -437,21 +425,19 @@ legate::Variable add_next_output(legate::AutoTask& task, const LogicalColumn& co
 template <>
 inline task::PhysicalColumn get_next_input<task::PhysicalColumn>(GPUTaskContext& ctx)
 {
-  auto cudf_type_id = static_cast<cudf::type_id>(
-    argument::get_next_scalar<std::underlying_type_t<cudf::type_id>>(ctx));
+  auto cudf_type = argument::get_next_scalar<cudf::data_type>(ctx);
   auto global_num_rows = argument::get_next_scalar<int64_t>(ctx);
   return task::PhysicalColumn(
-    ctx, ctx.get_next_input_arg(), cudf::data_type{cudf_type_id}, global_num_rows);
+    ctx, ctx.get_next_input_arg(), cudf_type, global_num_rows);
 }
 
 template <>
 inline task::PhysicalColumn get_next_output<task::PhysicalColumn>(GPUTaskContext& ctx)
 {
-  auto cudf_type_id = static_cast<cudf::type_id>(
-    argument::get_next_scalar<std::underlying_type_t<cudf::type_id>>(ctx));
+  auto cudf_type = argument::get_next_scalar<cudf::data_type>(ctx);
   auto global_num_rows = argument::get_next_scalar<int64_t>(ctx);
   return task::PhysicalColumn(
-    ctx, ctx.get_next_output_arg(), cudf::data_type{cudf_type_id}, global_num_rows);
+    ctx, ctx.get_next_output_arg(), cudf_type, global_num_rows);
 }
 
 }  // namespace argument
