@@ -32,6 +32,7 @@ class AggregationKind(Enum):
     CUDA: int
     CORRELATION: int
     COVARIANCE: int
+    COUNT_VALID: int
 
 def groupby_aggregation(
     table: LogicalTable,

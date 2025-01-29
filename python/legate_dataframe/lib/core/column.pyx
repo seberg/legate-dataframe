@@ -12,6 +12,7 @@ from libcpp.utility cimport move
 
 from cudf._lib.column cimport Column as cudfColumn
 from pylibcudf.libcudf.column.column cimport column
+from pylibcudf.types cimport DataType
 
 from legate_dataframe.lib.core.legate_task cimport get_auto_task_handle
 from legate_dataframe.lib.core.logical_array cimport cpp_LogicalArray
@@ -20,7 +21,6 @@ from typing import Any
 
 from cudf._typing import DtypeObj
 from legate.core import AutoTask, Field, LogicalArray
-from pylibcudf.types import DataType
 
 from legate_dataframe.lib.core.data_type cimport cpp_cudf_type_to_cudf_dtype
 
