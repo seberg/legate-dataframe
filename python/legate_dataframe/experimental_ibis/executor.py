@@ -18,6 +18,7 @@ from legate_dataframe.lib.groupby_aggregation import (
     AggregationKind,
     groupby_aggregation,
 )
+from legate_dataframe.lib.stream_compaction import apply_boolean_mask
 from legate_dataframe.lib.unaryop import unary_operation, unary_operator
 
 
@@ -50,13 +51,29 @@ def column(op: ops.Field, **kw):
 
 
 @execute.register
-def visit(op: ops.Project, **kw):
+def project(op: ops.Project, **kw):
     # Note: Will fail for scalars (and unnesting), which is fine, though.
     values = op.values.values()
     names = op.values.keys()
 
     columns = [execute(col, **kw) for col in values]
     return LogicalTable(columns, names)
+
+
+@execute.register
+def filter(op: ops.Filter, **kw):
+    tbl = execute(op.parent, **kw)
+    if not op.predicates:
+        return tbl
+
+    def _refine_mask(mask, other):
+        other = execute(other, **kw)
+        return binary_operation(mask, other, binary_operator.LOGICAL_AND, mask.dtype())
+
+    mask = execute(op.predicates[0], **kw)
+    mask = functools.reduce(_refine_mask, op.predicates[1:], mask)
+
+    return apply_boolean_mask(tbl, mask)
 
 
 _unaryops = {
