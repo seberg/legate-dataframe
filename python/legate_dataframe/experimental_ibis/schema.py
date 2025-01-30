@@ -5,6 +5,7 @@ from typing import List, Tuple
 
 import ibis.expr.datatypes as dt
 import ibis.expr.schema as sch
+from ibis import IbisError
 from pylibcudf.types import DataType, TypeId
 
 from legate_dataframe import LogicalTable
@@ -35,7 +36,10 @@ _from_legate_df_type = {v: k for k, v in _to_plc_type.items()}
 
 
 def to_plc_type(ibis_type):
-    # TODO: Should we take nullability into account? (and if, how?)
+    if ibis_type.nullable:
+        # Columns may not have a mask as an optimization, but logically we do
+        # never enforce this.  So it could make sense to allow and use this.
+        raise IbisError("non-nullable types are not supported by Legate.")
     return _to_plc_type[type(ibis_type)]
 
 

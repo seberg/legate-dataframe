@@ -152,12 +152,8 @@ class LegateBackend(BaseBackend, NoUrl):
             if schema is None:
                 schema = infer_schema_from_logical_table(table)
             else:
-                # Check if schema matches actual table (is it right to not
-                # enforce the schema by dropping cols or casting?)
                 actual_schema = infer_schema_from_logical_table(table)
                 if schema != actual_schema:
-                    # TODO: General Q: when to use Ibis errors and when not?!
-                    # (I find the broad use of IbisError a bit surprising.)
                     raise com.IbisError(
                         f"Schema {schema} and inferred one {actual_schema} do not match."
                     )
@@ -208,9 +204,7 @@ class LegateBackend(BaseBackend, NoUrl):
         **kwargs: Any,
     ) -> LogicalTable:
         """Execute after ensuring that the result is a logical table."""
-        if limit is not None and limit != "default":
-            raise NotImplementedError("limit parameter not supported.")
-
+        # TODO(seberg): we do not support (and ignore) the limit parameter for now.
         table_expr = expr.as_table()
 
         node = table_expr.op()
