@@ -3,6 +3,8 @@
 
 set -e -E -u -o pipefail
 
+source rapids-date-string
+
 rapids-print-env
 
 rapids-generate-version > ./VERSION
@@ -13,6 +15,7 @@ LEGATEDATAFRAME_PACKAGE_VERSION="$(head -1 ./VERSION)" \
 rapids-conda-retry mambabuild \
     --channel legate \
     --channel legate/label/rc \
+    --channel legate/label/branch-25.01 \
     --channel legate/label/experimental \
     --channel rapidsai \
     --channel conda-forge \

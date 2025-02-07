@@ -43,8 +43,10 @@ rapids-mamba-retry install \
   --channel "${RAPIDS_LOCAL_CONDA_CHANNEL}" \
   --channel legate \
   --channel legate/label/rc \
+  --channel legate/label/branch-25.01 \
   --channel legate/label/experimental \
   --channel rapidsai \
   --channel conda-forge \
   --channel nvidia \
-    "legate-dataframe=${LEGATEDATAFRAME_VERSION}"
+    "legate-dataframe=${LEGATEDATAFRAME_VERSION}" \
+    "legate-df-ctests=${LEGATEDATAFRAME_VERSION}"
