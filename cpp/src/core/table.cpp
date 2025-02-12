@@ -24,6 +24,8 @@
 
 #include <legate_dataframe/core/table.hpp>
 
+#include <iostream>
+
 namespace legate::dataframe {
 
 LogicalTable::LogicalTable(std::vector<LogicalColumn> columns,
@@ -139,6 +141,7 @@ bool PhysicalTable::is_broadcasted() const
 }  // namespace task
 
 namespace argument {
+
 std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
                                              const LogicalTable& tbl,
                                              bool broadcast)
@@ -150,6 +153,31 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
   for (const auto& col : tbl.get_columns()) {
     ret.push_back(add_next_input(task, col, broadcast));
   }
+  add_alignment_constraints(task, ret);
+  return ret;
+}
+
+std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
+                                             const LogicalTable& tbl,
+                                             const legate::LogicalArray& constraints)
+{
+  std::vector<legate::Variable> ret;
+  // First we add number of columns, use negative to signal constraints
+  add_next_scalar(task, -tbl.num_columns());
+  // Then we add each column
+  for (const auto& col : tbl.get_columns()) {
+    ret.push_back(add_next_input(task, col, /* broadcast */ false));
+  }
+  auto constraints_var = task.add_input(constraints);
+  // Require a column-wise partition of the constraints (hist)
+  task.add_constraint(legate::broadcast(constraints_var, {0}));
+  //for (auto var : ret) {
+  //  std::cout << "    adding imaging constraints" << std::endl;
+  //  task.add_constraint(legate::image(constraints_var, var));
+  //}
+  task.add_constraint(legate::image(constraints_var, ret.at(0)));
+  // TODO(seberg): If it works, it feels nice if we would add this here and
+  // just add image constraints for the first row.
   add_alignment_constraints(task, ret);
   return ret;
 }

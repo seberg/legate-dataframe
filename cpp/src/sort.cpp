@@ -37,7 +37,7 @@
 #include <legate_dataframe/core/repartition_by_hash.hpp>
 #include <legate_dataframe/join.hpp>
 
-#define DEBUG_SPLITS 0
+#define DEBUG_SPLITS 1
 #if DEBUG_SPLITS
 #include <iostream>
 #include <sstream>

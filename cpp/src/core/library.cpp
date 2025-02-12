@@ -20,6 +20,8 @@
 #include <legate_dataframe/core/allocator.hpp>
 #include <legate_dataframe/core/library.hpp>
 
+#include <iostream>
+
 namespace legate::dataframe {
 namespace task {
 
@@ -48,6 +50,7 @@ class Mapper : public legate::mapping::Mapper {
     const std::vector<legate::mapping::StoreTarget>& options) override
   {
     using legate::mapping::StoreMapping;
+   const auto task_id = static_cast<int>(task.task_id());
     std::vector<StoreMapping> mappings;
 
     // For now, we set "exact" policy for all Stores
@@ -58,8 +61,22 @@ class Mapper : public legate::mapping::Mapper {
         mappings.push_back(
           StoreMapping::default_mapping(store, options.front(), /*exact = */ true));
       }
+      // TODO: This is also needed for strings!
+      mappings.back().policy().ordering.set_c_order();
     }
+    bool first = true;
     for (const legate::mapping::Array& ary : task.outputs()) {
+      if (first && task_id == legate::dataframe::task::OpCode::HashPartition) {
+        /* The first output of HashPartition is mapped to the CZMEM */
+        // TODO: We could probably just use sysmem here, but there seems to be
+        // a small issue (as of early 25.03.00.dev) and we should then also set it
+        // for consuming tasks (since we never actually read it there).
+        mappings.push_back(
+          StoreMapping::default_mapping(ary.stores().at(0), legate::mapping::StoreTarget::ZCMEM, /*exact */ true));
+        first = false;
+        continue;
+      }
+      first = false;
       if (ary.type().variable_size()) { continue; }
       for (const legate::mapping::Store& store : ary.stores()) {
         mappings.push_back(
@@ -105,10 +122,16 @@ class Mapper : public legate::mapping::Mapper {
 
           return size_exchange_nbytes + metadata_nbytes;
         }
+        case legate::dataframe::task::OpCode::HashPartition: {
+          // TODO: This could probably just use sysmem here
+          auto nrank  = task.get_launch_domain().get_volume();
+          auto num_parts = task.scalars().at(0).value<int>();
+          num_parts = num_parts < 0 ? nrank : num_parts;
+          return nrank * num_parts * sizeof(legate::Rect<1>);
+        }
         default: return 0;
       }
     }
-
     // TODO: Returning nullopt prevents other parallel task launches so it would be
     //       good to provide estimated usage for most tasks here.
     return std::nullopt;
@@ -128,7 +151,7 @@ legate::Library create_and_registrate_library()
   }
   // Set with_has_allocations globally since currently all tasks allocate (and libcudf may also)
   // Also ensure we can generally work with 1000+ non-string return columns.
-  auto options = legate::VariantOptions{}.with_has_allocations(true).with_return_size(32768);
+  auto options = legate::VariantOptions{}.with_has_allocations(true);
   auto context =
     legate::Runtime::get_runtime()->find_or_create_library(library_name,
                                                            legate::ResourceConfig{},

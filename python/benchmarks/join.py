@@ -25,7 +25,8 @@ from cudf.utils.string import format_bytes
 
 
 def create_key_and_data(args, module):
-    if "dask" in args.api:
+    module.random.seed(0)
+    if True:  # "dask" in args.api:  TODO, was wondering if this helps legate split HashPartition, but problems seems a different...
         # Dask doesn't support argsort and random.permutation is very slow,
         # instead we use an (very good) approximation of --unique-factor.
         key = module.random.random_integers(low=0, high=2**50, size=args.nrows)
@@ -106,6 +107,13 @@ def run_legate(args):
     def f() -> Tuple[float, int]:
         lhs = create_table(args, name="lhs")
         rhs = create_table(args, name="rhs")
+
+        print("Sorting lhs, just to proof a point:")
+        from legate_dataframe.lib.sort import sort
+        sort(lhs, ["lhs-key"])
+        blocking_timing()
+        print("Sort done!")
+
         t0 = blocking_timing()
         res = join(
             lhs,
@@ -114,6 +122,7 @@ def run_legate(args):
             rhs_keys=["rhs-key"],
             join_type=JoinType.INNER,
             compare_nulls=null_equality.EQUAL,
+            _num_paritions=args.legate_parts,
         )
         t1 = blocking_timing()
         return t1 - t0, res.num_rows()
@@ -155,6 +164,7 @@ def main(args):
     with API[args.api](args) as f:
         for i in range(args.nwarms):
             elapsed, num_out_rows = f()
+            print("   num out:", num_out_rows)
             nbytes = num_out_rows * ncols * itemsize + nbytes_input  # Total size
             print(
                 f"elapsed[warm #{i}]: {elapsed:.4f}s ({nbytes/elapsed/2**30:.3f} GiB/s)"
@@ -246,6 +256,12 @@ if __name__ == "__main__":
         metavar="RMM_POOL_SIZE",
         default=None,
         help="The initial RMM pool size e.g. 1GiB (default: disabled).",
+    )
+    parser.add_argument(
+        "--legate-parts",
+        default=-1,
+        type=int,
+        help="Use legate partitioning approach (and how many partitions).",
     )
     args = parser.parse_args()
     main(args)
