@@ -459,7 +459,7 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
  * @param constraints A LogicalArray belonging to tbl as returned by `hashpartition`.
  * If passed, these are added as imaging constraints for the table.
  */
-std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
+legate::Variable add_next_input(legate::AutoTask& task,
                                              const LogicalTable& tbl,
                                              const legate::LogicalArray& constraints);
 

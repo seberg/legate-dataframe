@@ -132,6 +132,9 @@ hashpartition(const LogicalTable& table, const std::set<size_t>& keys, int num_p
   runtime->submit(std::move(task));
   // TODO: No good of course, fetches volume and num_parts == -1 is possible...
   partitions = partitions.delinearize(0, {partitions.volume() / num_parts, num_parts});
+  partitions = partitions.transpose({1, 0});  // Tranpose, so that all chunks are on the same thing even!
+  std::cout << "hmmmm, shape: " << partitions.shape().at(0) << ", " << partitions.shape().at(1) << std::endl;
+  //partitions = partitions.project(0, 0);
   return std::make_pair(output, partitions);
 }
 

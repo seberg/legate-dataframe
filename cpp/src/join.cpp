@@ -268,7 +268,7 @@ class JoinLocalTask : public Task<JoinLocalTask, OpCode::JoinLocal> {
   {
     GPUTaskContext ctx{context};
     const auto lhs          = argument::get_next_input<PhysicalTable>(ctx);
-    //const auto rhs          = argument::get_next_input<PhysicalTable>(ctx);
+    const auto rhs          = argument::get_next_input<PhysicalTable>(ctx);
     const auto lhs_keys     = argument::get_next_scalar_vector<int32_t>(ctx);
     const auto rhs_keys     = argument::get_next_scalar_vector<int32_t>(ctx);
     auto join_type          = argument::get_next_scalar<JoinType>(ctx);
@@ -278,20 +278,22 @@ class JoinLocalTask : public Task<JoinLocalTask, OpCode::JoinLocal> {
     auto output             = argument::get_next_output<PhysicalTable>(ctx);
 
     std::ostringstream info;
-    info << "local join @" << ctx.rank << " nrows1: " << lhs.table_view().num_rows() << std::endl;
-    // info << ", nrows2: " << rhs.table_view().num_rows() << std::endl;
+    //info << "local join @" << ctx.rank << " nrows1: " << lhs.shape<1>().volume() << std::endl;
+    //info << " nrows2: " << rhs.shape<1>().volume() << std::endl;
+    info << "local join @" << ctx.rank << " nrows1: " << lhs.table_view().num_rows();
+    info << ", nrows2: " << rhs.table_view().num_rows() << std::endl;
     std::cout << info.str() << std::endl;
 
-    //cudf_join_and_gather(ctx,
-    //                      lhs.table_view(),
-    //                      rhs.table_view(),
-    //                      lhs_keys,
-    //                      rhs_keys,
-    //                      join_type,
-    //                      null_equality,
-    //                      lhs_out_cols,
-    //                      rhs_out_cols,
-    //                      output);
+    cudf_join_and_gather(ctx,
+                          lhs.table_view(),
+                          rhs.table_view(),
+                          lhs_keys,
+                          rhs_keys,
+                          join_type,
+                          null_equality,
+                          lhs_out_cols,
+                          rhs_out_cols,
+                          output);
   }
 };
 
@@ -380,8 +382,10 @@ LogicalTable join(const LogicalTable& lhs,
 
     legate::AutoTask task = runtime->create_task(get_library(), task::JoinLocalTask::TASK_ID);
 
-    argument::add_next_input(task, lhs, lhs_constraints);
-    // argument::add_next_input(task, rhs, lhs_constraints);
+    auto lhs_constr_var = argument::add_next_input(task, lhs_part, lhs_constraints);
+    auto rhs_constr_var = argument::add_next_input(task, rhs_part, rhs_constraints);
+    task.add_constraint(legate::align(lhs_constr_var, rhs_constr_var));
+
     argument::add_next_scalar_vector(task, std::vector<int32_t>(lhs_keys.begin(), lhs_keys.end()));
     argument::add_next_scalar_vector(task, std::vector<int32_t>(rhs_keys.begin(), rhs_keys.end()));
     argument::add_next_scalar(task, static_cast<std::underlying_type_t<JoinType>>(join_type));

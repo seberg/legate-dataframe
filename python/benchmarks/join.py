@@ -25,8 +25,7 @@ from cudf.utils.string import format_bytes
 
 
 def create_key_and_data(args, module):
-    module.random.seed(0)
-    if True:  # "dask" in args.api:  TODO, was wondering if this helps legate split HashPartition, but problems seems a different...
+    if "dask" in args.api:
         # Dask doesn't support argsort and random.permutation is very slow,
         # instead we use an (very good) approximation of --unique-factor.
         key = module.random.random_integers(low=0, high=2**50, size=args.nrows)
@@ -108,11 +107,11 @@ def run_legate(args):
         lhs = create_table(args, name="lhs")
         rhs = create_table(args, name="rhs")
 
-        print("Sorting lhs, just to proof a point:")
-        from legate_dataframe.lib.sort import sort
-        sort(lhs, ["lhs-key"])
-        blocking_timing()
-        print("Sort done!")
+        # print("Sorting lhs, just to proof a point:")
+        # from legate_dataframe.lib.sort import sort
+        # sort(lhs, ["lhs-key"])
+        # blocking_timing()
+        # print("Sort done!")
 
         t0 = blocking_timing()
         res = join(

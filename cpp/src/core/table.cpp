@@ -157,7 +157,8 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
   return ret;
 }
 
-std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
+
+legate::Variable add_next_input(legate::AutoTask& task,
                                              const LogicalTable& tbl,
                                              const legate::LogicalArray& constraints)
 {
@@ -170,7 +171,7 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
   }
   auto constraints_var = task.add_input(constraints);
   // Require a column-wise partition of the constraints (hist)
-  task.add_constraint(legate::broadcast(constraints_var, {0}));
+  task.add_constraint(legate::broadcast(constraints_var, {1}));
   //for (auto var : ret) {
   //  std::cout << "    adding imaging constraints" << std::endl;
   //  task.add_constraint(legate::image(constraints_var, var));
@@ -179,8 +180,9 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
   // TODO(seberg): If it works, it feels nice if we would add this here and
   // just add image constraints for the first row.
   add_alignment_constraints(task, ret);
-  return ret;
+  return constraints_var;
 }
+
 
 std::vector<legate::Variable> add_next_output(legate::AutoTask& task, const LogicalTable& tbl)
 {
