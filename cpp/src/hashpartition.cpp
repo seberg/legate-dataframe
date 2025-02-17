@@ -35,6 +35,30 @@
 namespace legate::dataframe {
 namespace task {
 
+// This is a mini helper task to copy the paritions into a bound store
+// maybe there is a way to do this, but `issue_copy()` refuses to do this
+// on my store as of early 25.03.00.dev.
+class HashPartitionCopyTask : public Task<HashPartitionCopyTask, OpCode::HashPartitionCopy> {
+ public:
+  static void cpu_variant(legate::TaskContext context)
+  {
+    auto in  = context.input(0);
+    auto out = context.output(0);
+
+    auto in_acc  = in.data().read_accessor<legate::Rect<1>, 2>();
+    auto out_acc = out.data().write_accessor<legate::Rect<1>, 2>();
+
+    auto shape = in.shape<2>();
+
+    for (size_t i = shape.lo[0]; i <= shape.hi[0]; i++) {
+      for (size_t j = shape.lo[1]; j <= shape.hi[1]; j++) {
+        out_acc[{i, j}] = in_acc[{i, j}];
+      }
+    }
+  }
+};
+
+
 class HashPartitionTask : public Task<HashPartitionTask, OpCode::HashPartition> {
  public:
   static void gpu_variant(legate::TaskContext context)
@@ -105,6 +129,8 @@ hashpartition(const LogicalTable& table, const std::set<size_t>& keys, int num_p
     throw std::invalid_argument("num_parts must be >=1 or -1 to indicate same as input.");
   }
 
+  auto runtime = legate::Runtime::get_runtime();
+
   LogicalTable output = LogicalTable::empty_like(table);
 
   // The result of this task are "partitions" described in a nranks x num_parts
@@ -112,11 +138,8 @@ hashpartition(const LogicalTable& table, const std::set<size_t>& keys, int num_p
   // the number of parts here.
   // TODO: is an unbound store really needed.
   // TODO: Legate has problems with mixed ndims, so this is 1-D and reshaped later.
-  legate::LogicalArray partitions(
-    legate::Runtime::get_runtime()->create_array(legate::rect_type(1), 1)
-  );
+  legate::LogicalArray partitions{runtime->create_array(legate::rect_type(1), 1)};
 
-  auto runtime = legate::Runtime::get_runtime();
   legate::AutoTask task =
     runtime->create_task(get_library(), task::HashPartitionTask::TASK_ID);
   argument::add_next_scalar(task, num_parts);
@@ -132,10 +155,26 @@ hashpartition(const LogicalTable& table, const std::set<size_t>& keys, int num_p
   runtime->submit(std::move(task));
   // TODO: No good of course, fetches volume and num_parts == -1 is possible...
   partitions = partitions.delinearize(0, {partitions.volume() / num_parts, num_parts});
-  partitions = partitions.transpose({1, 0});  // Tranpose, so that all chunks are on the same thing even!
+  //partitions = partitions.transpose({1, 0});  // Tranpose, so that all chunks are on the same thing even!
   std::cout << "hmmmm, shape: " << partitions.shape().at(0) << ", " << partitions.shape().at(1) << std::endl;
   //partitions = partitions.project(0, 0);
-  return std::make_pair(output, partitions);
+
+  // TODO: unbound paritions are making problems maybe (currently), so copy to a bound one:
+  auto part_copy = runtime->create_array(
+    {partitions.shape().at(0), partitions.shape().at(1)}, legate::rect_type(1)
+  );
+  
+  task =
+    runtime->create_task(get_library(), task::HashPartitionCopyTask::TASK_ID);
+  auto part_copy_var = task.add_output(part_copy);
+  partitions_var = task.add_input(partitions);
+
+  task.add_constraint(legate::align(part_copy_var, partitions_var));
+  task.add_constraint(legate::broadcast(partitions_var, {0, 1}));
+
+  runtime->submit(std::move(task));
+
+  return std::make_pair(output, part_copy);
 }
 
 
@@ -158,6 +197,7 @@ namespace {
 void __attribute__((constructor)) register_tasks()
 {
   legate::dataframe::task::HashPartitionTask::register_variants();
+  legate::dataframe::task::HashPartitionCopyTask::register_variants();
 }
 
 }  // namespace

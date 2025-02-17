@@ -78,6 +78,18 @@ class LogicalColumn {
   LogicalColumn(cudf::column_view cudf_col,
                 rmm::cuda_stream_view stream = cudf::get_default_stream());
 
+  LogicalColumn copy_as_bound() const
+  {
+    auto runtime = legate::Runtime::get_runtime();
+    auto new_col = LogicalColumn(
+      runtime->create_array(array_->shape(), array_->type(), array_->nullable()),
+      cudf_type()
+    );
+    auto new_col_store = new_col.array_->data();
+    runtime->issue_copy(new_col_store, array_->data());
+    return new_col;
+  }
+
   /**
    * @brief Create a new unbounded column from an existing column
    *

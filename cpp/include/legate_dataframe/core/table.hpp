@@ -83,6 +83,23 @@ class LogicalTable {
                rmm::cuda_stream_view stream = cudf::get_default_stream());
 
   /**
+   * @brief Create a new table with new, copied, columns.
+   *
+   * TODO: At least for now just a hack to eplorer legate limitations...
+   *
+   * The result storage will be bound arrays.
+   */
+  LogicalTable copy_as_bound() const
+  {
+    std::vector<LogicalColumn> columns;
+    columns.reserve(columns_.size());
+    for (const auto& col : columns_) {
+      columns.emplace_back(col.copy_as_bound());
+    }
+    return LogicalTable(std::move(columns), get_column_names());
+  }
+
+  /**
    * @brief Create a new unbounded table from an existing table
    *
    * @param other The prototype table

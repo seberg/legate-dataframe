@@ -35,6 +35,7 @@ enum : int {
   BinaryOpColScalar,
   BinaryOpScalarCol,
   HashPartition,
+  HashPartitionCopy,
   Join,
   JoinLocal,
   ToTimestamps,

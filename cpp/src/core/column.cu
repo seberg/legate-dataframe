@@ -430,6 +430,7 @@ namespace argument {
 legate::Variable add_next_input(legate::AutoTask& task, const LogicalColumn& col, bool broadcast)
 {
   add_next_scalar(task, static_cast<std::underlying_type_t<cudf::type_id>>(col.cudf_type().id()));
+  std::cout << "    adding columns that is unbound:" << col.unbound() << std::endl;
   add_next_scalar(task, col.unbound() ? -1 : static_cast<int64_t>(col.num_rows()));
   auto arr      = col.get_logical_array();
   auto variable = task.add_input(arr);

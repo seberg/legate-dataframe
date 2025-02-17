@@ -171,15 +171,15 @@ legate::Variable add_next_input(legate::AutoTask& task,
   }
   auto constraints_var = task.add_input(constraints);
   // Require a column-wise partition of the constraints (hist)
-  task.add_constraint(legate::broadcast(constraints_var, {1}));
-  //for (auto var : ret) {
-  //  std::cout << "    adding imaging constraints" << std::endl;
-  //  task.add_constraint(legate::image(constraints_var, var));
-  //}
-  task.add_constraint(legate::image(constraints_var, ret.at(0)));
+  task.add_constraint(legate::broadcast(constraints_var, {0}));
+  for (auto var : ret) {
+    std::cout << "    adding imaging constraints that was unbound:" << constraints.unbound() << std::endl;
+    task.add_constraint(legate::image(constraints_var, var));
+  }
+  //task.add_constraint(legate::image(constraints_var, ret.at(0)));
   // TODO(seberg): If it works, it feels nice if we would add this here and
   // just add image constraints for the first row.
-  add_alignment_constraints(task, ret);
+  //add_alignment_constraints(task, ret);
   return constraints_var;
 }
 
