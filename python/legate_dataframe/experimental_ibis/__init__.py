@@ -5,6 +5,7 @@ import pathlib
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, Literal
+import warnings
 
 import cudf
 import ibis.common.exceptions as com
@@ -16,14 +17,18 @@ from ibis.backends import BaseBackend, NoUrl
 from ibis.common.dispatch import lazy_singledispatch
 
 import legate_dataframe.lib.csv
+import legate_dataframe.lib.parquet
 from legate_dataframe import LogicalColumn, LogicalTable
-from legate_dataframe.experimental_ibis.executor import execute as _execute_node
+from legate_dataframe.experimental_ibis.executor import execute
+from legate_dataframe.experimental_ibis.rewrites import rewrite_join
+# from ibis.backends.pandas.rewrites import rewrite_join
 from legate_dataframe.experimental_ibis.schema import (
     get_names_dtypes_from_schema,
     infer_schema_from_logical_table,
 )
 from legate_dataframe.experimental_ibis.utils import _gen_name
 
+__all__ = ["LegateBackend"]
 
 class LegateBackend(BaseBackend, NoUrl):
     name = "legate_dataframe"
@@ -73,6 +78,7 @@ class LegateBackend(BaseBackend, NoUrl):
         """read-csv version for legate.  Requires the schema to be passed
         currently.
         """
+        # TODO(seberg): read_csv should return a (lazy) expression.
         if table_name is None:
             table_name = _gen_name("read_csv", str(source))
 
@@ -91,11 +97,16 @@ class LegateBackend(BaseBackend, NoUrl):
         self,
         source: str | pathlib.Path,
         table_name: str | None = None,
+        *,
+        columns = None
     ):
+        # TODO(seberg): read_parquet should return a (lazy) expression and
+        # eventually auto project `columns=` so it is probably just not needed.
+        # (but even if lazy, it needs to eagerly find the schema).
         if table_name is None:
             table_name = _gen_name("read_parquet", str(source))
 
-        table = legate_dataframe.lib.parquet.parquet_read(source)
+        table = legate_dataframe.lib.parquet.parquet_read(source, columns=columns)
         return self.create_table(table_name, table)
 
     def list_tables(self, like=None, database=None):
@@ -208,13 +219,17 @@ class LegateBackend(BaseBackend, NoUrl):
         table_expr = expr.as_table()
 
         node = table_expr.op()
-        res = _execute_node(node, backend=self, params=params)
+        node = node.replace(rewrite_join, context={"params": params, "backend": self})
+
+        res = execute(node, backend=self, params=params, cache={})
 
         actual_schema = infer_schema_from_logical_table(res)
         if actual_schema != node.schema:
-            # We could just add a conversion step here, but generally
-            # we can hopefully just make sure it always matches.
-            raise RuntimeError("Schema of table did not match expected one.")
+            # TODO(seberg): Happens with decimals quickly, so for now
+            # just give a warning
+            warnings.warn(f"Result schema {actual_schema} and expected one {node.schema} do not match.",
+            UserWarning,
+        )
 
         return res
 
