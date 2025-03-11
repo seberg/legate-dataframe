@@ -37,7 +37,7 @@ namespace legate::dataframe::argument {
  * @param scalar The scalar.
  */
 template <typename T>
-inline void add_next_scalar(legate::AutoTask& task, const T& scalar)
+void add_next_scalar(legate::AutoTask& task, const T& scalar)
 {
   task.add_scalar_arg(legate::Scalar(scalar));
 }
@@ -61,7 +61,7 @@ inline void add_next_scalar<legate::Scalar>(legate::AutoTask& task, const legate
  * @param items The vector of scalars.
  */
 template <typename T>
-inline void add_next_scalar_vector(AutoTask& task, const std::vector<T>& scalars)
+void add_next_scalar_vector(AutoTask& task, const std::vector<T>& scalars)
 {
   // Temporary work-around 2025-03.  Legate may assert on data even for 0-size
   // so we build the scalar manually and do not copy if it is zero size.
@@ -132,7 +132,7 @@ T get_next_scalar(GPUTaskContext& ctx)
  * @return The vector of scalar values.
  */
 template <typename T>
-std::vector<T> inline get_next_scalar_vector(GPUTaskContext& ctx)
+std::vector<T> get_next_scalar_vector(GPUTaskContext& ctx)
 {
   auto items = ctx.get_next_scalar_arg().values<T>();
   std::vector<T> ret;
