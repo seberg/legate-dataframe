@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2023-2024, NVIDIA CORPORATION.
+# Copyright (c) 2023-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -107,6 +107,14 @@ set_target_properties(
              CUDA_STANDARD_REQUIRED ON
              POSITION_INDEPENDENT_CODE ON
              INTERFACE_POSITION_INDEPENDENT_CODE ON
+)
+
+list(APPEND LDF_CUDA_FLAGS --expt-extended-lambda)
+list(APPEND LDF_CUDA_FLAGS --expt-relaxed-constexpr)
+
+target_compile_options(
+  LegateDataframe PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${LDF_CXX_FLAGS}>"
+                          "$<$<COMPILE_LANGUAGE:CUDA>:${LDF_CUDA_FLAGS}>"
 )
 
 target_include_directories(

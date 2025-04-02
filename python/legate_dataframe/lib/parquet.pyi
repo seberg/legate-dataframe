@@ -7,9 +7,17 @@
 import pathlib
 from typing import Iterable
 
+from legate.core import LogicalArray
+
 from legate_dataframe.lib.core.table import LogicalTable
 
 def parquet_write(tbl: LogicalTable, path: pathlib.Path | str) -> None: ...
 def parquet_read(
     glob_string: pathlib.Path | str, *, columns: Iterable[str] | None
 ) -> LogicalTable: ...
+def parquet_read_array(
+    glob_string: pathlib.Path | str,
+    *,
+    columns: Iterable[str] | None,
+    nullable: bool = True,
+) -> LogicalArray: ...

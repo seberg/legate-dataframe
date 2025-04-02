@@ -61,4 +61,20 @@ void parquet_write(LogicalTable& tbl, const std::string& dirpath);
 LogicalTable parquet_read(const std::string& glob_string,
                           const std::optional<std::vector<std::string>>& columns = std::nullopt);
 
+/**
+ * @brief Read Parquet files into a legate Array
+ *
+ * Note that file order is currently glob/string sorted.  All columns that are being read must have
+ * the same type and be compatible with a legate type, currently only numeric types are supported.
+ *
+ * @param glob_string The glob string to specify the Parquet files. All glob matches must be valid
+ * Parquet files and have the same LogicalTable data types. See <https://linux.die.net/man/7/glob>.
+ * @param columns The columns names to read.
+ * @param nullable If set to ``False``, assume that the file does contain any nulls.
+ * @return The read LogicalTable
+ */
+legate::LogicalArray parquet_read_array(const std::string& glob_string,
+                                        const std::optional<std::vector<std::string>>& columns,
+                                        const bool nullable);
+
 }  // namespace legate::dataframe

@@ -17,45 +17,15 @@
 #pragma once
 
 #include <legate.h>
-#include <legate/mapping/mapping.h>
+
+#include <cudf/table/table_view.hpp>
+#include <legate_dataframe/core/task_context.hpp>
 
 namespace legate::dataframe {
-namespace task {
 
-namespace OpCode {
-enum : int {
-  ApplyBooleanMask,
-  CSVWrite,
-  CSVRead,
-  ParquetWrite,
-  ParquetRead,
-  ParquetReadArray,
-  ReplaceNullsWithScalar,
-  UnaryOp,
-  BinaryOpColCol,
-  BinaryOpColScalar,
-  BinaryOpScalarCol,
-  Join,
-  ToTimestamps,
-  ExtractTimestampComponent,
-  ReduceLocal,
-  Sequence,
-  Sort,
-  GroupByAggregation
-};
-}
-
-struct Registry {
-  static legate::TaskRegistrar& get_registrar();
-};
-
-template <typename T, int ID>
-struct Task : public legate::LegateTask<T> {
-  using Registrar = Registry;
-};
-
-}  // namespace task
-
-legate::Library& get_library();
+void copy_into_tranposed(GPUTaskContext& ctx,
+                         legate::PhysicalArray& array,
+                         cudf::table_view tbl,
+                         size_t offset);
 
 }  // namespace legate::dataframe

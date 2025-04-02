@@ -8,6 +8,9 @@ Parquet files
     legate_dataframe.lib.parquet.parquet_read
 
 .. autofunction::
+    legate_dataframe.lib.parquet.parquet_read_array
+
+.. autofunction::
     legate_dataframe.lib.parquet.parquet_write
 
 

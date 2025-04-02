@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <filesystem>
 #include <stdexcept>
 #include <vector>
@@ -28,6 +29,7 @@
 #include <legate_dataframe/core/library.hpp>
 #include <legate_dataframe/core/table.hpp>
 #include <legate_dataframe/core/task_context.hpp>
+#include <legate_dataframe/core/transposed_copy.cuh>
 
 #include <legate_dataframe/parquet.hpp>
 
@@ -124,37 +126,92 @@ class ParquetRead : public Task<ParquetRead, OpCode::ParquetRead> {
   }
 };
 
+class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray> {
+ public:
+  static inline const auto TASK_CONFIG =
+    legate::TaskConfig{legate::LocalTaskID{OpCode::ParquetReadArray}};
+
+  static void gpu_variant(legate::TaskContext context)
+  {
+    GPUTaskContext ctx{context};
+    const auto file_paths = argument::get_next_scalar_vector<std::string>(ctx);
+    const auto columns    = argument::get_next_scalar_vector<std::string>(ctx);
+    const auto nrows      = argument::get_next_scalar_vector<size_t>(ctx);
+    auto out              = ctx.get_next_output_arg();
+
+    if (file_paths.size() != nrows.size()) {
+      throw std::runtime_error("internal error: file path and nrows size mismatch");
+    }
+    const size_t ncols = columns.size();
+    if (columns.size() != out.shape<2>().hi[1] + 1) {
+      throw std::runtime_error("internal error: columns size and result shape mismatch");
+    }
+
+    // Iterate through the file and nrow list and read as many rows from the
+    // files as this rank should read while skipping those of the other tasks.
+    std::vector<std::unique_ptr<cudf::table>> tables;
+    size_t total_rows_seen = 0;  // offset into the current file
+    for (size_t i = 0; i < file_paths.size(); i++) {
+      auto file_rows = nrows[i];
+
+      if (total_rows_seen + file_rows < out.shape<2>().lo[0]) {
+        // All of this files rows belong to earlier ranks.
+        total_rows_seen += file_rows;
+        continue;
+      } else if (total_rows_seen > out.shape<2>().hi[0]) {
+        // We have read all rows for this chunk.
+        break;
+      }
+
+      // start and end (exclusive) rows within this particular file:
+      auto start =
+        out.shape<2>().lo[0] > total_rows_seen ? out.shape<2>().lo[0] - total_rows_seen : 0;
+      auto end = std::min<size_t>(out.shape<2>().hi[0] - total_rows_seen + 1, file_rows);
+
+      while (start < end) {
+        // Read a few hundred MiB at a time (assumes datatype isn't very narrow)
+        auto nrows_to_read = std::min<size_t>(end - start, ((1 << 25) + ncols - 1) / ncols);
+
+        auto src = cudf::io::source_info(file_paths[i]);
+        auto opt = cudf::io::parquet_reader_options::builder(src);
+        opt.columns(columns);
+        opt.skip_rows(start);
+        opt.num_rows(nrows_to_read);
+
+        auto tbl = cudf::io::read_parquet(opt, ctx.stream(), ctx.mr()).tbl;
+        // Write to output array, this is a transposed copy.
+        copy_into_tranposed(ctx, out, tbl->view(), start + total_rows_seen);
+
+        start += nrows_to_read;
+      }
+      total_rows_seen += file_rows;
+    }
+  }
+};
+
 }  // namespace legate::dataframe::task
+
+namespace legate::dataframe {
 
 namespace {
 
 const auto reg_id_ = []() -> char {
   legate::dataframe::task::ParquetWrite::register_variants();
   legate::dataframe::task::ParquetRead::register_variants();
+  legate::dataframe::task::ParquetReadArray::register_variants();
   return 0;
 }();
 
-}  // namespace
+struct ParquetReadInfo {
+  std::vector<std::string> file_paths;
+  std::vector<std::string> column_names;
+  std::vector<size_t> nrows;
+  size_t nrows_total;
+  std::unique_ptr<cudf::table> prototype_table;
+};
 
-namespace legate::dataframe {
-
-void parquet_write(LogicalTable& tbl, const std::string& dirpath)
-{
-  std::filesystem::create_directories(dirpath);
-  if (!std::filesystem::is_empty(dirpath)) {
-    throw std::invalid_argument("if path exist, it must be an empty directory");
-  }
-  auto runtime = legate::Runtime::get_runtime();
-  legate::AutoTask task =
-    runtime->create_task(get_library(), task::ParquetWrite::TASK_CONFIG.task_id());
-  argument::add_next_scalar(task, dirpath);
-  argument::add_next_scalar_vector(task, tbl.get_column_name_vector());
-  argument::add_next_input(task, tbl);
-  runtime->submit(std::move(task));
-}
-
-LogicalTable parquet_read(const std::string& glob_string,
-                          const std::optional<std::vector<std::string>>& columns)
+ParquetReadInfo get_parquet_info(const std::string& glob_string,
+                                 const std::optional<std::vector<std::string>>& columns)
 {
   std::vector<std::string> file_paths = parse_glob(glob_string);
   if (file_paths.empty()) { throw std::invalid_argument("no parquet files specified"); }
@@ -182,29 +239,90 @@ LogicalTable parquet_read(const std::string& glob_string,
     nrows_total += metadata.num_rows();
   }
 
-  LogicalTable ret = LogicalTable::empty_like(*result.tbl, column_names);
-
-  // cudf doesn't raise if names are missing, so check now (just to have a map)
-  auto names_in_table = ret.get_column_names();
-  if (columns.has_value() && columns.value().size() != names_in_table.size()) {
+  // Validate column names if specified
+  if (columns.has_value()) {
+    std::set<std::string> names_in_table{column_names.begin(), column_names.end()};
     for (auto col : columns.value()) {
       if (names_in_table.count(col) == 0) {
         throw std::invalid_argument("column was not found in parquet file: " + std::string(col));
       }
     }
-    // Should never reach here:
-    throw std::invalid_argument("not all columns found in parquet file.");
   }
+
+  return {std::move(file_paths),
+          std::move(column_names),
+          std::move(nrows),
+          nrows_total,
+          std::move(result.tbl)};
+}
+
+}  // namespace
+
+void parquet_write(LogicalTable& tbl, const std::string& dirpath)
+{
+  std::filesystem::create_directories(dirpath);
+  if (!std::filesystem::is_empty(dirpath)) {
+    throw std::invalid_argument("if path exist, it must be an empty directory");
+  }
+  auto runtime = legate::Runtime::get_runtime();
+  legate::AutoTask task =
+    runtime->create_task(get_library(), task::ParquetWrite::TASK_CONFIG.task_id());
+  argument::add_next_scalar(task, dirpath);
+  argument::add_next_scalar_vector(task, tbl.get_column_name_vector());
+  argument::add_next_input(task, tbl);
+  runtime->submit(std::move(task));
+}
+
+LogicalTable parquet_read(const std::string& glob_string,
+                          const std::optional<std::vector<std::string>>& columns)
+{
+  auto info        = get_parquet_info(glob_string, columns);
+  LogicalTable ret = LogicalTable::empty_like(*info.prototype_table, info.column_names);
 
   auto runtime = legate::Runtime::get_runtime();
   legate::AutoTask task =
     runtime->create_task(get_library(), task::ParquetRead::TASK_CONFIG.task_id());
-  argument::add_next_scalar_vector(task, file_paths);
-  argument::add_next_scalar_vector(task, ret.get_column_name_vector());
-  argument::add_next_scalar_vector(task, nrows);
-  argument::add_next_scalar(task, nrows_total);
+  argument::add_next_scalar_vector(task, info.file_paths);
+  argument::add_next_scalar_vector(task, info.column_names);
+  argument::add_next_scalar_vector(task, info.nrows);
+  argument::add_next_scalar(task, info.nrows_total);
   argument::add_next_output(task, ret);
   argument::add_parallel_launch_task(task);
+  runtime->submit(std::move(task));
+  return ret;
+}
+
+legate::LogicalArray parquet_read_array(const std::string& glob_string,
+                                        const std::optional<std::vector<std::string>>& columns,
+                                        const bool nullable)
+{
+  auto runtime = legate::Runtime::get_runtime();
+  auto info    = get_parquet_info(glob_string, columns);
+
+  auto cudf_type = info.prototype_table->get_column(0).type();
+  if (!cudf::is_numeric(cudf_type)) {
+    throw std::invalid_argument("only numeric columns are supported for parquet_read_array");
+  }
+  for (auto&& col : info.prototype_table->view()) {
+    if (col.type().id() != cudf_type.id()) {
+      throw std::invalid_argument("all columns must have the same type");
+    }
+  }
+
+  /* For numeric types this mapping is safe: */
+  auto legate_type = to_legate_type(cudf_type.id());
+
+  auto ret =
+    runtime->create_array({info.nrows_total, info.column_names.size()}, legate_type, nullable);
+
+  legate::AutoTask task =
+    runtime->create_task(get_library(), task::ParquetReadArray::TASK_CONFIG.task_id());
+  argument::add_next_scalar_vector(task, info.file_paths);
+  argument::add_next_scalar_vector(task, info.column_names);
+  argument::add_next_scalar_vector(task, info.nrows);
+
+  auto var = task.add_output(ret);
+  task.add_constraint(legate::broadcast(var, {1}));
   runtime->submit(std::move(task));
   return ret;
 }
