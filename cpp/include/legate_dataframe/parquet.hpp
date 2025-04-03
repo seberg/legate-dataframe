@@ -75,6 +75,7 @@ LogicalTable parquet_read(const std::string& glob_string,
  */
 legate::LogicalArray parquet_read_array(const std::string& glob_string,
                                         const std::optional<std::vector<std::string>>& columns,
-                                        const bool nullable);
+                                        const legate::Scalar& null_value,
+                                        const std::optional<legate::Type>& type);
 
 }  // namespace legate::dataframe

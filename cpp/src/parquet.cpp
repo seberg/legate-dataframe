@@ -21,6 +21,7 @@
 
 #include <cudf/concatenate.hpp>
 #include <cudf/io/parquet.hpp>
+#include <cudf/unary.hpp>
 
 #include <legate.h>
 #include <legate/cuda/cuda.h>
@@ -137,7 +138,10 @@ class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray>
     const auto file_paths = argument::get_next_scalar_vector<std::string>(ctx);
     const auto columns    = argument::get_next_scalar_vector<std::string>(ctx);
     const auto nrows      = argument::get_next_scalar_vector<size_t>(ctx);
+    auto null_value       = ctx.get_next_scalar_arg();
     auto out              = ctx.get_next_output_arg();
+
+    auto expected_type_id = to_cudf_type_id(out.type().code());
 
     if (file_paths.size() != nrows.size()) {
       throw std::runtime_error("internal error: file path and nrows size mismatch");
@@ -179,8 +183,18 @@ class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray>
         opt.num_rows(nrows_to_read);
 
         auto tbl = cudf::io::read_parquet(opt, ctx.stream(), ctx.mr()).tbl;
+        /* Check if all columns are of the right type and cast them if not. */
+        auto column_vec = tbl->release();
+        for (auto& col : column_vec) {
+          if (col->type().id() != expected_type_id) {
+            col =
+              cudf::cast(col->view(), cudf::data_type{expected_type_id}, ctx.stream(), ctx.mr());
+          }
+        }
+        auto cast_tbl = cudf::table(std::move(column_vec));
+
         // Write to output array, this is a transposed copy.
-        copy_into_tranposed(ctx, out, tbl->view(), start + total_rows_seen);
+        copy_into_tranposed(ctx, out, cast_tbl.view(), start + total_rows_seen, null_value);
 
         start += nrows_to_read;
       }
@@ -294,23 +308,43 @@ LogicalTable parquet_read(const std::string& glob_string,
 
 legate::LogicalArray parquet_read_array(const std::string& glob_string,
                                         const std::optional<std::vector<std::string>>& columns,
-                                        const bool nullable)
+                                        const legate::Scalar& null_value,
+                                        const std::optional<legate::Type>& type)
 {
   auto runtime = legate::Runtime::get_runtime();
   auto info    = get_parquet_info(glob_string, columns);
 
-  auto cudf_type = info.prototype_table->get_column(0).type();
-  if (!cudf::is_numeric(cudf_type)) {
-    throw std::invalid_argument("only numeric columns are supported for parquet_read_array");
-  }
-  for (auto&& col : info.prototype_table->view()) {
-    if (col.type().id() != cudf_type.id()) {
-      throw std::invalid_argument("all columns must have the same type");
+  legate::Type legate_type = legate::null_type();
+
+  if (!type.has_value()) {
+    auto cudf_type = info.prototype_table->get_column(0).type();
+    if (!cudf::is_numeric(cudf_type)) {
+      throw std::invalid_argument("only numeric columns are supported for parquet_read_array");
+    }
+    for (auto&& col : info.prototype_table->view()) {
+      if (col.type().id() != cudf_type.id()) {
+        throw std::invalid_argument("all columns must have the same type");
+      }
+    }
+
+    legate_type = to_legate_type(cudf_type.id());
+  } else {
+    legate_type = type.value();
+
+    auto cudf_type = cudf::data_type{to_cudf_type_id(legate_type.code())};
+    for (auto&& col : info.prototype_table->view()) {
+      if (!cudf::is_supported_cast(col.type(), cudf_type)) {
+        throw std::invalid_argument("Cannot cast all columns to specified type");
+      }
     }
   }
 
-  /* For numeric types this mapping is safe: */
-  auto legate_type = to_legate_type(cudf_type.id());
+  auto nullable = null_value.type().code() == Type::Code::NIL;
+  if (!nullable) {
+    if (null_value.type() != legate_type) {
+      throw std::invalid_argument("null value must be null or have the same type as the result");
+    }
+  }
 
   auto ret =
     runtime->create_array({info.nrows_total, info.column_names.size()}, legate_type, nullable);
@@ -320,6 +354,7 @@ legate::LogicalArray parquet_read_array(const std::string& glob_string,
   argument::add_next_scalar_vector(task, info.file_paths);
   argument::add_next_scalar_vector(task, info.column_names);
   argument::add_next_scalar_vector(task, info.nrows);
+  argument::add_next_scalar(task, null_value);
 
   auto var = task.add_output(ret);
   task.add_constraint(legate::broadcast(var, {1}));

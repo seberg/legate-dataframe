@@ -13,3 +13,9 @@ cdef extern from "legate.h":
         FBMEM
         ZCMEM
         SOCKETMEM
+
+    cdef cppclass cpp_Scalar "legate::Scalar":
+        pass
+
+    cdef cppclass cpp_Type "legate::Type":
+        pass

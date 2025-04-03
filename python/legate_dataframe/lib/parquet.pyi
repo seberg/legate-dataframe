@@ -7,7 +7,7 @@
 import pathlib
 from typing import Iterable
 
-from legate.core import LogicalArray
+import legate.core
 
 from legate_dataframe.lib.core.table import LogicalTable
 
@@ -18,6 +18,7 @@ def parquet_read(
 def parquet_read_array(
     glob_string: pathlib.Path | str,
     *,
-    columns: Iterable[str] | None,
-    nullable: bool = True,
-) -> LogicalArray: ...
+    columns: Iterable[str] | None = None,
+    null_value: legate.core.Scalar | None = None,
+    type: legate.core.Type | None = None,
+) -> legate.core.LogicalArray: ...

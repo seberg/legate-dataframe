@@ -17,11 +17,13 @@ import glob
 import cudf
 import cupy
 import dask_cudf
+import legate.core
 import pytest
 from legate.core import get_legate_runtime
 
 from legate_dataframe import LogicalColumn, LogicalTable
 from legate_dataframe.lib.parquet import parquet_read, parquet_read_array, parquet_write
+from legate_dataframe.lib.replace import replace_nulls
 from legate_dataframe.testing import assert_frame_equal, std_dataframe_set
 
 
@@ -99,10 +101,22 @@ def test_read_array(tmp_path, npartitions=2, glob_string="/*"):
     ddf = dask_cudf.from_cudf(df, npartitions=npartitions)
     ddf.to_parquet(path=tmp_path, index=False)
 
-    tbl = parquet_read(str(tmp_path) + glob_string, columns=["b", "a", "d"])
+    tbl = parquet_read(str(tmp_path) + glob_string, columns=["b", "a", "d", "c"])
+    tbl = LogicalTable(
+        [
+            tbl["b"],
+            tbl["a"],
+            tbl["d"],
+            replace_nulls(tbl["c"], cudf.Scalar(0.5, "float32")),
+        ],
+        ["b", "a", "d", "c"],
+    )
     arr_from_tbl = tbl.to_array()
+
+    # Need a null value to ensure there is no mask.
+    null_value = legate.core.Scalar(0.5, legate.core.float32)
     arr = parquet_read_array(
-        str(tmp_path) + glob_string, columns=["b", "a", "d"], nullable=False
+        str(tmp_path) + glob_string, columns=["b", "a", "d", "c"], null_value=null_value
     )
     arr = cn.asarray(arr)
 
@@ -110,11 +124,37 @@ def test_read_array(tmp_path, npartitions=2, glob_string="/*"):
     assert cn.array_equal(arr_from_tbl, arr)
 
     # Check if the mask behavior seems right for column "c"
-    arr = parquet_read_array(str(tmp_path) + glob_string, columns=["c"], nullable=True)
+    arr = parquet_read_array(str(tmp_path) + glob_string, columns=["c"])
     col_from_arr = LogicalColumn(arr.project(1, 0))
     col = parquet_read(str(tmp_path) + glob_string, columns=["c"])["c"]
 
     assert_frame_equal(col_from_arr, col)
+
+
+def test_read_array_cast(tmp_path, npartitions=2, glob_string="/*"):
+    cn = pytest.importorskip("cupynumeric")
+
+    df = cudf.DataFrame(
+        {
+            "a": cupy.arange(10000, dtype="float32"),
+            "b": cupy.arange(1, 10001, dtype="float64"),
+        }
+    )
+    ddf = dask_cudf.from_cudf(df, npartitions=npartitions)
+    ddf.to_parquet(path=tmp_path, index=False)
+
+    null_value = legate.core.Scalar(0, legate.core.float32)
+    arr = parquet_read_array(
+        str(tmp_path) + glob_string,
+        columns=["a", "b"],
+        null_value=null_value,  # guarantee non-nullable result
+        type=legate.core.float32,
+    )
+    arr = cn.asarray(arr)
+
+    assert arr.dtype == "float32"
+    assert cn.array_equal(arr[:, 0], cn.arange(10000, dtype="float32"))
+    assert cn.array_equal(arr[:, 1], cn.arange(1, 10001, dtype="float32"))
 
 
 def test_read_array_large(tmp_path, npartitions=1, glob_string="/*"):
@@ -126,5 +166,8 @@ def test_read_array_large(tmp_path, npartitions=1, glob_string="/*"):
     ddf.to_parquet(path=tmp_path, index=False)
     del df, ddf
 
-    arr = parquet_read_array(str(tmp_path) + glob_string, columns=["a"], nullable=False)
+    null_value = legate.core.Scalar(0, legate.core.uint8)
+    arr = parquet_read_array(
+        str(tmp_path) + glob_string, columns=["a"], null_value=null_value
+    )
     assert cn.asarray(arr).sum() == 2**26

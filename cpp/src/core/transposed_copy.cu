@@ -45,9 +45,10 @@ struct copy_into_transposed_impl {
   void operator()(GPUTaskContext& ctx,
                   legate::PhysicalArray& array,
                   cudf::table_view tbl,
-                  size_t offset)
+                  size_t offset,
+                  legate::Scalar& null_value)
   {
-    copy_into_transposed_fn<T>{}(ctx, array, tbl, offset);
+    copy_into_transposed_fn<T>{}(ctx, array, tbl, offset, null_value);
   }
 };
 
@@ -56,7 +57,8 @@ struct copy_into_transposed_fn<T, std::enable_if_t<cudf::is_rep_layout_compatibl
   void operator()(GPUTaskContext& ctx,
                   legate::PhysicalArray& array,
                   cudf::table_view tbl,
-                  size_t offset)
+                  size_t offset,
+                  legate::Scalar& null_value)
   {
     legate::Rect<2> bounds{{offset, 0}, {offset + tbl.num_rows() - 1, tbl.num_columns() - 1}};
     if (bounds.empty()) { return; }
@@ -69,36 +71,51 @@ struct copy_into_transposed_fn<T, std::enable_if_t<cudf::is_rep_layout_compatibl
     // Similar to cudf's interleave_columns (we don't want to allocate, so avoid it).
     auto device_input = cudf::table_device_view::create(tbl, ctx.stream());
 
-    auto get_value_func = cuda::proclaim_return_type<T>(
-      [input = *device_input, divisor = tbl.num_columns()] __device__(size_t idx) {
-        return input.column(idx % divisor).element<T>(idx / divisor);
-      });
-
     auto index_begin = thrust::make_counting_iterator<size_t>(0);
     auto index_end   = thrust::make_counting_iterator<size_t>(bounds.volume());
 
-    // This assumes that for rep_layout_compatible types `.element<T>(idx)` is OK even for masked
-    // values.
-    thrust::transform(
-      rmm::exec_policy(ctx.stream()), index_begin, index_end, acc.ptr(bounds.lo), get_value_func);
+    if (!array.nullable()) {
+      auto get_value_func =
+        cuda::proclaim_return_type<T>([input   = *device_input,
+                                       divisor = tbl.num_columns(),
+                                       val     = null_value.value<T>()] __device__(size_t idx) {
+          if (input.column(idx % divisor).is_valid(idx / divisor)) {
+            return input.column(idx % divisor).element<T>(idx / divisor);
+          } else {
+            return val;
+          }
+        });
 
-    if (!array.nullable()) { return; }
+      thrust::transform(
+        rmm::exec_policy(ctx.stream()), index_begin, index_end, acc.ptr(bounds.lo), get_value_func);
+    } else {
+      // This assumes that for rep_layout_compatible types `.element<T>(idx)` is OK even for masked
+      // values.
+      auto get_value_func = cuda::proclaim_return_type<T>(
+        [input = *device_input, divisor = tbl.num_columns()] __device__(size_t idx) {
+          return input.column(idx % divisor).element<T>(idx / divisor);
+        });
 
-    auto get_isvalid_func = cuda::proclaim_return_type<bool>(
-      [input = *device_input, divisor = tbl.num_columns()] __device__(size_t idx) {
-        return input.column(idx % divisor).is_valid_nocheck(idx / divisor);
-      });
+      thrust::transform(
+        rmm::exec_policy(ctx.stream()), index_begin, index_end, acc.ptr(bounds.lo), get_value_func);
 
-    auto mask_acc = array.null_mask().write_accessor<bool, 2, true>();
-    if (!mask_acc.accessor.is_dense_row_major(bounds)) {
-      throw std::runtime_error("internal error: copy_into_transpose assume C-order store (mask).");
+      auto get_isvalid_func = cuda::proclaim_return_type<bool>(
+        [input = *device_input, divisor = tbl.num_columns()] __device__(size_t idx) {
+          return input.column(idx % divisor).is_valid_nocheck(idx / divisor);
+        });
+
+      auto mask_acc = array.null_mask().write_accessor<bool, 2, true>();
+      if (!mask_acc.accessor.is_dense_row_major(bounds)) {
+        throw std::runtime_error(
+          "internal error: copy_into_transpose assume C-order store (mask).");
+      }
+
+      thrust::transform(rmm::exec_policy(ctx.stream()),
+                        index_begin,
+                        index_end,
+                        mask_acc.ptr(bounds.lo),
+                        get_isvalid_func);
     }
-
-    thrust::transform(rmm::exec_policy(ctx.stream()),
-                      index_begin,
-                      index_end,
-                      mask_acc.ptr(bounds.lo),
-                      get_isvalid_func);
   }
 };
 
@@ -107,18 +124,17 @@ struct copy_into_transposed_fn<T, std::enable_if_t<cudf::is_rep_layout_compatibl
 void copy_into_tranposed(GPUTaskContext& ctx,
                          legate::PhysicalArray& array,
                          cudf::table_view tbl,
-                         size_t offset)
+                         size_t offset,
+                         legate::Scalar& null_value)
 {
   for (auto&& col : tbl) {
     if (to_cudf_type_id(array.type().code()) != col.type().id()) {
       throw std::runtime_error("internal error: column types changed between files?");
     }
-    if (!array.nullable() && col.null_count() > 0) {
-      throw std::invalid_argument("file is assumed to not contain nulls.");
-    }
   }
 
-  cudf::type_dispatcher(tbl.column(0).type(), copy_into_transposed_impl{}, ctx, array, tbl, offset);
+  cudf::type_dispatcher(
+    tbl.column(0).type(), copy_into_transposed_impl{}, ctx, array, tbl, offset, null_value);
 }
 
 }  // namespace legate::dataframe

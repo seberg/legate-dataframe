@@ -26,6 +26,7 @@ namespace legate::dataframe {
 void copy_into_tranposed(GPUTaskContext& ctx,
                          legate::PhysicalArray& array,
                          cudf::table_view tbl,
-                         size_t offset);
+                         size_t offset,
+                         legate::Scalar& null_value);
 
 }  // namespace legate::dataframe
