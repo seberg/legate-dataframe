@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2024, NVIDIA CORPORATION.
+# Copyright (c) 2024-2025, NVIDIA CORPORATION.
 
 set -e -E -u -o pipefail
 
@@ -44,4 +44,6 @@ rapids-mamba-retry install \
 
 rapids-print-env
 
+# Make documentation, we need gpu but otherwise minimal resources
+LEGATE_CONFIG="--omps=0 --gpus=1 --fbmem=100 --cpus=1 --utility=1" \
 make -C docs html
