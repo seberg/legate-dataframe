@@ -50,7 +50,8 @@ class ParquetWrite : public Task<ParquetWrite, OpCode::ParquetWrite> {
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const std::string dirpath  = argument::get_next_scalar<std::string>(ctx);
     const auto column_names    = argument::get_next_scalar_vector<std::string>(ctx);
     const auto table           = argument::get_next_input<PhysicalTable>(ctx);
@@ -77,7 +78,8 @@ class ParquetRead : public Task<ParquetRead, OpCode::ParquetRead> {
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const auto file_paths  = argument::get_next_scalar_vector<std::string>(ctx);
     const auto columns     = argument::get_next_scalar_vector<std::string>(ctx);
     const auto nrows       = argument::get_next_scalar_vector<size_t>(ctx);
@@ -141,7 +143,8 @@ class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray>
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const auto file_paths = argument::get_next_scalar_vector<std::string>(ctx);
     const auto columns    = argument::get_next_scalar_vector<std::string>(ctx);
     const auto nrows      = argument::get_next_scalar_vector<size_t>(ctx);

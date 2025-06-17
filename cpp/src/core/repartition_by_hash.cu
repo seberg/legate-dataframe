@@ -42,7 +42,7 @@ namespace {
 class ExchangedSizes {
  private:
   legate::Buffer<std::size_t> _all_sizes;
-  GPUTaskContext& _ctx;
+  TaskContext& _ctx;
 
  public:
   // We use a temporary stream for the metadata communication. This ways, we avoid
@@ -59,9 +59,9 @@ class ExchangedSizes {
    * will be send to the i'th task. NB: all tasks beside itself must have a map thus:
    * `columns.size() == ctx.nranks - 1`.
    */
-  ExchangedSizes(GPUTaskContext& ctx, const std::map<int, cudf::packed_columns>& columns)
-    : _ctx(ctx), stream(ctx.tmp_stream())
+  ExchangedSizes(TaskContext& ctx, const std::map<int, cudf::packed_columns>& columns) : _ctx(ctx)
   {
+    LEGATE_CHECK_CUDA(cudaStreamCreate(&stream));
     assert(columns.size() == ctx.nranks - 1);
     // Note: Size of this buffer is taken into account in the mapper:
     _all_sizes =
@@ -93,6 +93,8 @@ class ExchangedSizes {
     LEGATE_CHECK_CUDA(cudaStreamSynchronize(stream));
     task.concurrent_task_barrier();
   }
+
+  ~ExchangedSizes() { LEGATE_CHECK_CUDA(cudaStreamDestroy(stream)); }
 
   // TODO: implement a destructor that syncs and calls _all_sizes.destroy(). Currently,
   //       the lifespan of `_all_sizes` is until the legate task finish.
@@ -139,10 +141,11 @@ class ExchangedSizes {
  */
 std::pair<std::vector<cudf::table_view>,
           std::unique_ptr<std::pair<std::map<int, rmm::device_buffer>, cudf::table>>>
-shuffle(GPUTaskContext& ctx,
+shuffle(TaskContext& ctx,
         std::vector<cudf::table_view>& tbl_partitioned,
         std::unique_ptr<cudf::table> owning_table)
 {
+  auto context = ctx.get_legate_context();
   if (tbl_partitioned.size() != ctx.nranks) {
     throw std::runtime_error("internal error: partition split has wrong size.");
   }
@@ -257,7 +260,7 @@ shuffle(GPUTaskContext& ctx,
 }
 
 std::unique_ptr<cudf::table> repartition_by_hash(
-  GPUTaskContext& ctx,
+  TaskContext& ctx,
   const cudf::table_view& table,
   const std::vector<cudf::size_type>& columns_to_hash)
 {

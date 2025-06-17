@@ -36,7 +36,7 @@ class BinaryOpColColTask : public Task<BinaryOpColColTask, OpCode::BinaryOpColCo
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
     auto op        = argument::get_next_scalar<cudf::binary_operator>(ctx);
     const auto lhs = argument::get_next_input<PhysicalColumn>(ctx);
     const auto rhs = argument::get_next_input<PhysicalColumn>(ctx);

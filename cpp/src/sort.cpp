@@ -55,7 +55,7 @@ namespace {
  * @param include_start Whether to include the starting 0.
  * @returns cudf column selecting containing nsplits indices.
  */
-std::unique_ptr<cudf::column> get_split_ind(GPUTaskContext& ctx,
+std::unique_ptr<cudf::column> get_split_ind(TaskContext& ctx,
                                             cudf::size_type nvalues,
                                             int nsplits,
                                             bool include_start)
@@ -128,7 +128,7 @@ std::unique_ptr<cudf::column> get_split_ind(GPUTaskContext& ctx,
  * depending on whether it came from an earlier or later rank.
  */
 std::unique_ptr<std::vector<cudf::size_type>> find_splits_for_distribution(
-  GPUTaskContext& ctx,
+  TaskContext& ctx,
   const cudf::table_view& my_sorted_tbl,
   const std::vector<cudf::size_type>& keys_idx,
   const std::vector<cudf::order>& column_order,
@@ -316,7 +316,8 @@ class SortTask : public Task<SortTask, OpCode::Sort> {
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const auto tbl             = argument::get_next_input<PhysicalTable>(ctx);
     const auto keys_idx        = argument::get_next_scalar_vector<cudf::size_type>(ctx);
     const auto column_order    = argument::get_next_scalar_vector<cudf::order>(ctx);
