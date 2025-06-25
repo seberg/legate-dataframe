@@ -180,44 +180,34 @@ class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray>
     const auto row_group_ranges  = argument::get_next_scalar_vector<legate::Rect<2>>(ctx);
     const auto nrow_groups_total = argument::get_next_scalar<size_t>(ctx);
     auto null_value              = ctx.get_next_scalar_arg();
+    auto row_group_ranges_arr    = ctx.get_next_input_arg();
     auto out                     = ctx.get_next_output_arg();
-    argument::get_parallel_launch_task(ctx);
+    // argument::get_parallel_launch_task(ctx);
 
     auto expected_type_id = to_cudf_type_id(out.type().code());
 
-    auto [my_groups_offset, my_num_groups] =
-      evenly_partition_work(nrow_groups_total, ctx.rank, ctx.nranks);
+    std::stringstream stream_dbg;
+    stream_dbg << std::endl;
+    stream_dbg << "rank " << ctx.rank << " of " << ctx.nranks
+               << " row_group_ranges: " << row_group_ranges_arr.shape<1>().lo[0] << "-"
+               << row_group_ranges_arr.shape<1>().hi[0] << std::endl;
+    stream_dbg << "     " << ctx.rank << " out: " << out.shape<2>().lo[0] << "-"
+               << out.shape<2>().hi[0] << " and " << out.shape<2>().lo[1] << "-"
+               << out.shape<2>().hi[1] << std::endl;
+    std::cout << stream_dbg.str() << std::endl;
+
+    auto my_groups_offset = row_group_ranges_arr.shape<1>().lo[0];
+    auto my_num_groups =
+      row_group_ranges_arr.shape<1>().hi[0] - row_group_ranges_arr.shape<1>().lo[0] + 1;
 
     if (file_paths.size() != ngroups_per_file.size()) {
       throw std::runtime_error("internal error: file path and nrows size mismatch");
     }
-    if (my_num_groups == 0) {
-      out.data().bind_empty_data();
-      if (out.nullable()) { out.null_mask().bind_empty_data(); }
-      return;
-    }
+    if (my_num_groups == 0) { return; }
 
     const size_t ncols = columns.size();
 
-    // TODO: This is hack (including the partitioning above).  We should be passing in a bound
-    // output with image constraints on row_group_ranges at which point we would just need to know
-    // the row groups assigned to us (the number of rows will be correct in the output array shape).
-    legate::Rect<2> start = row_group_ranges.at(my_groups_offset);
-    legate::Rect<2> end   = row_group_ranges.at(my_groups_offset + my_num_groups - 1);
-
-    void* data_ptr = legate::type_dispatch(out.data().code(),
-                                           create_result_store_fn{},
-                                           out.data(),
-                                           legate::Point<2>({end.hi[0] - start.lo[0] + 1, ncols}));
-    std::optional<bool*> null_ptr;
-    if (out.nullable()) {
-      auto null_buf = out.null_mask().create_output_buffer<bool, 2>(
-        legate::Point<2>({end.hi[0] - start.lo[0] + 1, ncols}), true);
-      auto ptr = null_buf.ptr({0, 0});
-      null_ptr = ptr;
-    }
-
-    if (columns.size() != start.hi[1] - start.lo[1] + 1) {
+    if (columns.size() != out.shape<2>().hi[1] - out.shape<2>().lo[1] + 1) {
       throw std::runtime_error("internal error: columns size and result shape mismatch");
     }
 
@@ -247,16 +237,13 @@ class ParquetReadArray : public Task<ParquetReadArray, OpCode::ParquetReadArray>
       }
       auto cast_tbl = cudf::table(std::move(column_vec));
 
-      if (end.hi[0] - start.lo[0] + 1 < rows_already_written + cast_tbl.num_rows()) {
+      if (out.shape<2>().lo[0] + rows_already_written > out.shape<2>().hi[0]) {
         throw std::runtime_error("internal error: output smaller than expected.");
       }
       // Write to output array, this is a transposed copy.
       copy_into_tranposed(
-        ctx, data_ptr, null_ptr, cast_tbl.view(), rows_already_written, null_value);
+        ctx, out, cast_tbl.view(), out.shape<2>().lo[0] + rows_already_written, null_value);
 
-      if (null_ptr.has_value()) { null_ptr = null_ptr.value() + cast_tbl.num_rows() * ncols; }
-      data_ptr =
-        static_cast<char*>(data_ptr) + cast_tbl.num_rows() * ncols * out.data().type().size();
       rows_already_written += cast_tbl.num_rows();
     }
   }
@@ -368,6 +355,8 @@ ParquetReadInfo get_parquet_info(const std::string& glob_string,
       // TODO: Legate limitations force us to use a 2D rect here, which we don't actually want/need
       // but the array is 2-D and the broadcast constraint currently doesn't work to make it 1-D
       // for this purpose. (As of legate 25.05)
+      std::cout << "nrows_total: " << nrows_total << " nrows_in_group: " << nrows_in_group
+                << std::endl;
       row_group_ranges.emplace_back(legate::Rect<2>(
         {nrows_total, 0}, {nrows_total + nrows_in_group - 1, column_names.size() - 1}));
       nrows_total += nrows_in_group;
@@ -485,23 +474,22 @@ legate::LogicalArray parquet_read_array(const std::string& glob_string,
   }
 
   // See below, this should not be late-bound, but that requires working imagine constraints.
-  auto ret = runtime->create_array(legate_type, 2, nullable);
+  auto ret =
+    runtime->create_array({info.nrows_total, info.column_names.size()}, legate_type, nullable);
 
   legate::AutoTask task =
     runtime->create_task(get_library(), task::ParquetReadArray::TASK_CONFIG.task_id());
   argument::add_next_scalar_vector(task, info.file_paths);
   argument::add_next_scalar_vector(task, info.column_names);
   argument::add_next_scalar_vector(task, info.nrow_groups);
+  // TODO: some of this would be unused on this branch.
   argument::add_next_scalar_vector(task, info.row_group_ranges_vec);
   argument::add_next_scalar(task, info.nrow_groups_total);
   argument::add_next_scalar(task, null_value);
 
-  // auto constraint_var = task.add_input(info.row_group_ranges);
-  auto var = task.add_output(ret);
-  task.add_constraint(legate::broadcast(var, {1}));
-  argument::add_parallel_launch_task_2d(task);
-  // See issue 2398
-  // task.add_constraint(legate::image(constraint_var, var));
+  auto constraint_var = task.add_input(info.row_group_ranges);
+  auto var            = task.add_output(ret);
+  task.add_constraint(legate::image(constraint_var, var));
   runtime->submit(std::move(task));
   return ret;
 }
