@@ -101,6 +101,7 @@ outputs:
         - numpy >=1.23,<3.0.0a0
         - rmm {{ rapids_version }}
         - cudf {{ rapids_version }}
+        - pynvjitlink<=0.6
     ignore_run_exports_from:
       - cupynumeric  # only a build dependency to help resolver
     run_exports:

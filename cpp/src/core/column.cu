@@ -238,12 +238,17 @@ legate::LogicalArray from_arrow(std::shared_ptr<arrow::Array> arrow_array)
   }
   auto array = runtime->create_array({std::uint64_t(arrow_array->length())},
                                      to_legate_type(arrow_array->type_id()),
-                                     1,
-                                     arrow_array->null_bitmap_data() != nullptr);
+                                     arrow_array->null_count() > 0,
+                                     false /* scalar */);
   from_arrow(array.get_physical_array(), arrow_array);
   return array;
 }
 
+legate::LogicalArray from_arrow(std::shared_ptr<arrow::Scalar> scalar)
+{
+  auto array = ARROW_RESULT(arrow::MakeArrayFromScalar(*scalar, 1));
+  return from_arrow(array);
+}
 }  // namespace
 
 LogicalColumn::LogicalColumn(cudf::column_view cudf_col, rmm::cuda_stream_view stream)
@@ -261,6 +266,14 @@ LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Array> arrow_array)
                   from_arrow(arrow_array),
                   cudf::data_type(to_cudf_type_id(to_legate_type(arrow_array->type_id()).code())),
                   /* scalar */ false}
+{
+}
+
+LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Scalar> arrow_scalar)
+  : LogicalColumn{// This type conversion monstrosity can be improved
+                  from_arrow(arrow_scalar),
+                  cudf::data_type(to_cudf_type_id(to_legate_type(arrow_scalar->type->id()).code())),
+                  /* scalar */ true}
 {
 }
 
@@ -368,9 +381,14 @@ std::shared_ptr<arrow::Array> LogicalColumn::get_arrow() const
   } else {
     auto physical_array = array_->get_physical_array();
     auto nbytes         = array_->volume() * array_->type().size();
-    std::shared_ptr<arrow::Buffer> data =
-      ARROW_RESULT(arrow::AllocateBuffer(nbytes * sizeof(int8_t)));
-    std::memcpy(data->mutable_data(), read_accessor_as_1d_bytes(physical_array.data()), nbytes);
+    std::shared_ptr<arrow::Buffer> data;
+    if (this->type().code() == legate::Type::Code::BOOL) {
+      // Convert to bit packed
+      data = null_mask_bools_to_bits(physical_array.data());
+    } else {
+      data = ARROW_RESULT(arrow::AllocateBuffer(nbytes * sizeof(int8_t)));
+      std::memcpy(data->mutable_data(), read_accessor_as_1d_bytes(physical_array.data()), nbytes);
+    }
     std::shared_ptr<arrow::Buffer> null_bitmask;
     if (array_->nullable()) { null_bitmask = null_mask_bools_to_bits(physical_array.null_mask()); }
     auto array_data =
@@ -495,9 +513,17 @@ std::shared_ptr<arrow::Array> PhysicalColumn::arrow_array_view() const
     }
   } else {
     auto nbytes = array_.shape<1>().volume() * array_.type().size();
-    // 1. Wrap the data in an arrow buffer
-    auto buffer = std::make_shared<arrow::Buffer>(
-      reinterpret_cast<const uint8_t*>(read_accessor_as_1d_bytes(array_.data())), nbytes);
+    // 1. Create arrow data buffer - try to use the existing data
+    std::shared_ptr<arrow::Buffer> buffer;
+    if (this->type().code() == legate::Type::Code::BOOL) {
+      // Arrow stores bool bit packed so we must copy
+      buffer = null_mask_bools_to_bits(array_.data());
+    } else {
+      // For other types, we can use the existing data directly
+      buffer = std::make_shared<arrow::Buffer>(
+        reinterpret_cast<const uint8_t*>(read_accessor_as_1d_bytes(array_.data())), nbytes);
+    }
+
     // 2. Handle null mask
     std::shared_ptr<arrow::Buffer> null_bitmask;
     if (array_.nullable()) { null_bitmask = null_mask_bools_to_bits(array_.null_mask()); }
