@@ -196,6 +196,11 @@ struct ArrowToPhysicalArrayVisitor {
 // Binds the legate array if it is unbound
 void from_arrow(legate::PhysicalArray array, std::shared_ptr<arrow::Array> arrow_array)
 {
+  if (array.type() != to_legate_type(*arrow_array->type())) {
+    throw std::invalid_argument("from_arrow(): type mismatch: " + array.type().to_string() +
+                                " != " + arrow_array->type()->ToString());
+  }
+
   if (array.nullable()) {
     bool* null_mask;
     // If the array is a string, its null mask lives in a different place
@@ -237,7 +242,7 @@ legate::LogicalArray from_arrow(std::shared_ptr<arrow::Array> arrow_array)
     return array;
   }
   auto array = runtime->create_array({std::uint64_t(arrow_array->length())},
-                                     to_legate_type(arrow_array->type_id()),
+                                     to_legate_type(*arrow_array->type()),
                                      arrow_array->null_count() > 0,
                                      false /* scalar */);
   from_arrow(array.get_physical_array(), arrow_array);
@@ -264,7 +269,7 @@ LogicalColumn::LogicalColumn(const cudf::scalar& cudf_scalar, rmm::cuda_stream_v
 LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Array> arrow_array)
   : LogicalColumn{// This type conversion monstrosity can be improved
                   from_arrow(arrow_array),
-                  cudf::data_type(to_cudf_type_id(to_legate_type(arrow_array->type_id()).code())),
+                  cudf::data_type(to_cudf_type_id(to_legate_type(*arrow_array->type()).code())),
                   /* scalar */ false}
 {
 }
@@ -272,7 +277,7 @@ LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Array> arrow_array)
 LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Scalar> arrow_scalar)
   : LogicalColumn{// This type conversion monstrosity can be improved
                   from_arrow(arrow_scalar),
-                  cudf::data_type(to_cudf_type_id(to_legate_type(arrow_scalar->type->id()).code())),
+                  cudf::data_type(to_cudf_type_id(to_legate_type(*arrow_scalar->type).code())),
                   /* scalar */ true}
 {
 }
