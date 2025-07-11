@@ -164,7 +164,11 @@ struct ArrowToPhysicalArrayVisitor {
     std::memcpy(out, array.raw_values(), array.length() * sizeof(T));
     return arrow::Status::OK();
   }
-  arrow::Status Visit(const arrow::StringArray& array)
+
+  template <typename ArrayType,
+            std::enable_if_t<std::is_same_v<ArrayType, arrow::StringArray> ||
+                             std::is_same_v<ArrayType, arrow::LargeStringArray>>* = nullptr>
+  arrow::Status Visit(const ArrayType& array)
   {
     auto legate_string_array = array_.as_string_array();
     auto ranges_size         = array.length();
@@ -230,7 +234,7 @@ void from_arrow(legate::PhysicalArray array, std::shared_ptr<arrow::Array> arrow
 }
 
 // Copy an arrow array into a logical array
-legate::LogicalArray from_arrow(std::shared_ptr<arrow::Array> arrow_array)
+legate::LogicalArray from_arrow(std::shared_ptr<arrow::Array> arrow_array, bool scalar = false)
 {
   // Create an unbound logical array
   auto runtime = legate::Runtime::get_runtime();
@@ -238,6 +242,13 @@ legate::LogicalArray from_arrow(std::shared_ptr<arrow::Array> arrow_array)
     auto array = runtime->create_string_array(
       runtime->create_array({std::uint64_t(arrow_array->length())}, legate::rect_type(1)),
       runtime->create_array({std::uint64_t(string_array->total_values_length())}, legate::int8()));
+    from_arrow(array.get_physical_array(), arrow_array);
+    return array;
+  } else if (auto large_string_array = dynamic_cast<arrow::LargeStringArray*>(arrow_array.get())) {
+    auto array = runtime->create_string_array(
+      runtime->create_array({std::uint64_t(arrow_array->length())}, legate::rect_type(1)),
+      runtime->create_array({std::uint64_t(large_string_array->total_values_length())},
+                            legate::int8()));
     from_arrow(array.get_physical_array(), arrow_array);
     return array;
   }
@@ -269,7 +280,7 @@ LogicalColumn::LogicalColumn(const cudf::scalar& cudf_scalar, rmm::cuda_stream_v
 LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Array> arrow_array)
   : LogicalColumn{// This type conversion monstrosity can be improved
                   from_arrow(arrow_array),
-                  cudf::data_type(to_cudf_type_id(to_legate_type(*arrow_array->type()).code())),
+                  to_cudf_type(arrow_array->type()),
                   /* scalar */ false}
 {
 }
@@ -277,7 +288,7 @@ LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Array> arrow_array)
 LogicalColumn::LogicalColumn(std::shared_ptr<arrow::Scalar> arrow_scalar)
   : LogicalColumn{// This type conversion monstrosity can be improved
                   from_arrow(arrow_scalar),
-                  cudf::data_type(to_cudf_type_id(to_legate_type(*arrow_scalar->type).code())),
+                  to_cudf_type(arrow_scalar->type),
                   /* scalar */ true}
 {
 }
