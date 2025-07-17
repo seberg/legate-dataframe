@@ -279,13 +279,12 @@ def test_sort_polars_stable(descending, nulls_last):
 
     # Here make sure that identical values (maybe nulls) exist
     mask = np.random.randint(2, size=10_000, dtype=bool)
-    pl.DataFrame(
+    q = pl.DataFrame(
         {
             "a": pa.array(np.random.random(10_000), mask=mask),
             "b": np.random.randint(100, size=10_000),
         }
-    )
-    q = pl.DataFrame({"a": [1, 2, 3], "b": [1, 2, 3]}).lazy()
+    ).lazy()
 
     assert_matches_polars(
         q.sort("a", nulls_last=nulls_last, descending=descending, maintain_order=True)
