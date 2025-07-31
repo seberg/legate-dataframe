@@ -63,30 +63,21 @@ inline void add_next_scalar<legate::Scalar>(legate::AutoTask& task, const legate
 template <typename T>
 void add_next_scalar_vector(AutoTask& task, const std::vector<T>& scalars)
 {
-  // Temporary work-around 2025-03.  Legate may assert on data even for 0-size
-  // so we build the scalar manually and do not copy if it is zero size.
-  auto arr_type =
-    legate::fixed_array_type(legate::primitive_type(legate::type_code_of_v<T>), scalars.size());
-  add_next_scalar(task, legate::Scalar(arr_type, scalars.data(), /* copy */ scalars.size() > 0));
+  add_next_scalar(task, legate::Scalar(scalars));
 }
 
 template <>
-inline void add_next_scalar_vector(AutoTask& task, const std::vector<bool>& scalars)
+inline void add_next_scalar_vector(AutoTask& task, const std::vector<legate::Rect<1>>& scalars)
 {
-  // Bool vectors don't work directly (because of bit-storage), so for simplicity
-  // allow them via an overload here.  (This is as of 2025-03.)
-  // Also do not copy if empty (see general vector code above).
-  auto arr_type = legate::fixed_array_type(legate::bool_(), scalars.size());
-  std::vector<char> tmp;
-  tmp.assign(scalars.begin(), scalars.end());
-
-  add_next_scalar(task, legate::Scalar(arr_type, tmp.data(), /* copy */ scalars.size() > 0));
+  /* Ironically, legate 25.08 has issues with legate scalars. */
+  auto arr_type = legate::fixed_array_type(legate::rect_type(1), scalars.size());
+  add_next_scalar(task, legate::Scalar(arr_type, scalars.data(), /* copy */ true));
 }
 
 template <>
 inline void add_next_scalar_vector(AutoTask& task, const std::vector<std::string>& scalars)
 {
-  // String vectors don't work as scalars directly in legate as of 2025-03.
+  // String vectors don't work as scalars directly in legate as of 2025-08.
   std::stringstream ss;
   std::vector<size_t> lengths;
   lengths.reserve(scalars.size());
@@ -144,7 +135,7 @@ std::vector<T> get_next_scalar_vector(TaskContext& ctx)
 }
 
 template <>
-std::vector<std::string> inline get_next_scalar_vector(GPUTaskContext& ctx)
+inline std::vector<std::string> get_next_scalar_vector(TaskContext& ctx)
 {
   std::vector<std::string> ret;
   auto lengths = get_next_scalar_vector<std::size_t>(ctx);
