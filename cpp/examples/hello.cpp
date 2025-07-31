@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <legate_dataframe/filling.hpp>
 #include <legate_dataframe/parquet.hpp>
 #include <legate_dataframe/unaryop.hpp>
+#include <legate_dataframe/utils.hpp>
 
 int main(void)
 {
@@ -33,7 +34,7 @@ int main(void)
   legate::dataframe::LogicalColumn col_a = legate::dataframe::sequence(20, -10);
 
   // Compute the absolute value of each row in `col_a`
-  legate::dataframe::LogicalColumn col_b = unary_operation(col_a, cudf::unary_operator::ABS);
+  legate::dataframe::LogicalColumn col_b = unary_operation(col_a, "abs");
 
   // Create a new logical table that contains the two existing columns (zero-copy)
   // naming them "a" and "b"
@@ -55,7 +56,8 @@ int main(void)
   // Then we can read the parquet files back into a logical table. We
   // provide a Glob string that reference all the parquet files that
   // should go into the logical table.
-  auto tbl_b = legate::dataframe::parquet_read("./my_parquet_file/*.parquet");
+  auto files = legate::dataframe::parse_glob("./my_parquet_file/*.parquet");
+  auto tbl_b = legate::dataframe::parquet_read(files);
 
   // Clean up
   std::filesystem::remove_all("./my_parquet_file");

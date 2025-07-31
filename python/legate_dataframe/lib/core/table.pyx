@@ -4,12 +4,13 @@
 # distutils: language = c++
 # cython: language_level=3
 
+import pyarrow as pa
 from libcpp.string cimport string
 from libcpp.utility cimport move
 from libcpp.vector cimport vector
 
 from legate_dataframe.lib.core.column cimport LogicalColumn, cpp_LogicalColumn
-from legate_dataframe.lib.core.legate cimport cpp_StoreTarget
+from legate_dataframe.lib.core.legate cimport cpp_StoreTarget, from_python_slice
 from legate_dataframe.lib.core.table cimport cpp_LogicalTable
 
 from typing import Iterable
@@ -92,6 +93,34 @@ cdef class LogicalTable:
             columns=(LogicalColumn.from_cudf(c) for c in df._columns),
             column_names=df.columns
         )
+
+    @staticmethod
+    def from_arrow(table: pa.Table) -> LogicalTable:
+        """Create a logical table from a local arrow table
+
+        This call blocks the client's control flow and scatter
+        the data to all legate nodes.
+
+        Parameters
+        ----------
+        table : pyarrow.Table
+            Arrow table
+
+        Returns
+        -------
+            New logical table
+        """
+        columns = [LogicalColumn.from_arrow(a.combine_chunks()) for a in table.columns]
+        return LogicalTable(
+            columns=columns,
+            column_names=table.column_names,
+        )
+
+    def lazy(self):
+        # Import here to avoid hard polars dependency
+        from legate_dataframe.ldf_polars import lazy_from_legate_df
+
+        return lazy_from_legate_df(self)
 
     def num_columns(self) -> int:
         """Returns the number of columns
@@ -254,6 +283,23 @@ cdef class LogicalTable:
         """
         self._handle.offload_to(target_mem)
 
+    def slice(self, slice_):
+        """Slice the table by rows, this is the same as slicing all columns
+        individually.
+
+        Parameters
+        ----------
+        slice_ :
+            Python slice. The return will be a view in the original data.
+
+        Returns
+        -------
+            The sliced logical table as a view.
+        """
+        return LogicalTable.from_handle(
+            self._handle.slice(from_python_slice(slice_))
+        )
+
     def to_array(self, *, out=None):
         """Convert the table or a set of columns to a cupynumeric array.
 
@@ -271,7 +317,9 @@ cdef class LogicalTable:
         """
         from cupynumeric import stack
 
-        return stack([self[n] for n in range(self.num_columns())], axis=1, out=out)
+        return stack(
+            [self[n].to_array() for n in range(self.num_columns())], axis=1, out=out
+        )
 
     def to_cudf(self) -> cudf.DataFrame:
         """Copy the logical table into a local cudf table
@@ -287,6 +335,13 @@ cdef class LogicalTable:
         ret = cudf.DataFrame()
         for i, name in enumerate(self.get_column_names()):
             ret[name] = self.get_column(i).to_cudf()
+        return ret
+
+    def to_arrow(self) -> pa.Table:
+        ret = pa.table(
+            [self.get_column(i).to_arrow() for i in range(self.num_columns())],
+            names=self.get_column_names(),
+        )
         return ret
 
     def repr(self, size_t max_num_items=30) -> str:

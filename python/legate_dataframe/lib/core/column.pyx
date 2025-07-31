@@ -4,17 +4,22 @@
 # distutils: language = c++
 # cython: language_level=3
 
+import pyarrow as pa
+
 from cython.operator cimport dereference
 from libc.stdint cimport uintptr_t
 from libcpp.memory cimport unique_ptr
 from libcpp.string cimport string
 from libcpp.utility cimport move
 
-from cudf._lib.column cimport Column as cudfColumn
-from cudf._lib.scalar cimport DeviceScalar
-from pylibcudf.libcudf.column.column cimport column
+import cudf
 
-from legate_dataframe.lib.core.legate cimport cpp_StoreTarget
+from pyarrow.lib cimport pyarrow_unwrap_array, pyarrow_unwrap_scalar, pyarrow_wrap_array
+from pylibcudf.column cimport Column as PylibcudfColumn
+from pylibcudf.libcudf.column.column cimport column
+from pylibcudf.scalar cimport Scalar as PylibcudfScalar
+
+from legate_dataframe.lib.core.legate cimport cpp_StoreTarget, from_python_slice
 from legate_dataframe.lib.core.legate_task cimport get_auto_task_handle
 from legate_dataframe.lib.core.logical_array cimport cpp_LogicalArray
 
@@ -24,6 +29,7 @@ from cudf._typing import DtypeObj
 from legate.core import AutoTask, Field, LogicalArray
 
 from legate_dataframe.lib.core.data_type cimport (
+    DataType,
     cpp_cudf_type_to_cudf_dtype,
     is_legate_compatible,
 )
@@ -79,7 +85,7 @@ cdef class LogicalColumn:
 
         This call blocks the client's control flow and scatter
         the data to all legate nodes.
-        If the input is a ``DeviceScalar`` the column will be marked as
+        If the input is a cudf/pylibcudf scalar the column will be marked as
         scalar.
 
         Parameters
@@ -91,19 +97,58 @@ cdef class LogicalColumn:
         -------
             New logical column
         """
-        cdef cudfColumn col
-        cdef DeviceScalar scalar
-        if isinstance(col_or_scalar, cudfColumn):
-            col = <cudfColumn>col_or_scalar
+        cdef PylibcudfColumn col
+        cdef PylibcudfScalar scalar
+        if isinstance(col_or_scalar, cudf.Series):
+            col_or_scalar = col_or_scalar._column.to_pylibcudf("read")
+        elif isinstance(col_or_scalar, cudf.core.column.column.ColumnBase):
+            col_or_scalar = col_or_scalar.to_pylibcudf("read")
+        elif isinstance(col_or_scalar, cudf.Scalar):
+            col_or_scalar = col_or_scalar.device_value
+
+        if isinstance(col_or_scalar, PylibcudfColumn):
+            col = <PylibcudfColumn>col_or_scalar
             return LogicalColumn.from_handle(cpp_LogicalColumn(col.view()))
-        elif isinstance(col_or_scalar, DeviceScalar):
-            scalar = <DeviceScalar>col_or_scalar
+        elif isinstance(col_or_scalar, PylibcudfScalar):
+            scalar = <PylibcudfScalar>col_or_scalar
             return LogicalColumn.from_handle(
-                cpp_LogicalColumn(dereference(scalar.get_raw_ptr()))
+                cpp_LogicalColumn(dereference(scalar.get()))
             )
         else:
             raise TypeError(
                 "from_cudf() only supports cudf columns and device scalars."
+            )
+
+    @staticmethod
+    def from_arrow(array_or_scalar) -> LogicalColumn:
+        """Create a logical column from a local arrow array or scalar.
+
+        This call blocks the client's control flow.
+
+        Parameters
+        ----------
+        array
+            pyarrow array
+
+        Returns
+        -------
+            New logical column
+        """
+        cdef shared_ptr[CArray] arrow_array
+        cdef shared_ptr[CScalar] arrow_scalar
+        if isinstance(array_or_scalar, pa.Scalar):
+            arrow_scalar = pyarrow_unwrap_scalar(array_or_scalar)
+            if arrow_scalar.get() == NULL:
+                raise TypeError("not a scalar")
+            return LogicalColumn.from_handle(cpp_LogicalColumn(arrow_scalar))
+        elif isinstance(array_or_scalar, pa.Array):
+            arrow_array = pyarrow_unwrap_array(array_or_scalar)
+            if arrow_array.get() == NULL:
+                raise TypeError("not an array")
+            return LogicalColumn.from_handle(cpp_LogicalColumn(arrow_array))
+        else:
+            raise TypeError(
+                "from_arrow() only supports pyarrow arrays and scalars."
             )
 
     @staticmethod
@@ -134,6 +179,11 @@ cdef class LogicalColumn:
             if column is unbound
         """
         return self._handle.num_rows()
+
+    def type(self) -> DataType:
+        """Return the low-level data type.
+        """
+        return DataType.from_libcudf(self._handle.cudf_type())
 
     def dtype(self) -> DtypeObj:
         """Returns the cudf data type of the row elements
@@ -244,21 +294,32 @@ cdef class LogicalColumn:
             arr.flags.writeable = False
         return arr
 
-    def to_cudf(self) -> cudfColumn:
-        """Copy the logical column into a local cudf column
+    def to_arrow(self) -> pa.Array:
+        """Copy column to an arrow array
+
+        Returns
+        -------
+            An arrow array
+
+        """
+        return pyarrow_wrap_array(self._handle.get_arrow())
+
+    def to_cudf(self):
+        """Copy the logical column into a local cudf column.
 
         This call blocks the client's control flow and fetches the data for the
         whole column to the current node.
 
         Returns
         -------
-            A cudf column that owns its data.
+            A cudf series that owns its data.
 
         """
         cdef unique_ptr[column] col = self._handle.get_cudf()
-        return cudfColumn.from_unique_ptr(move(col))
+        pylibcudf_col = PylibcudfColumn.from_libcudf(move(col))
+        return cudf.core.column.column.ColumnBase.from_pylibcudf(pylibcudf_col)
 
-    def to_cudf_scalar(self) -> DeviceScalar:
+    def to_cudf_scalar(self):
         """Copy the logical column into a local cudf scalar
 
         This call blocks the client's control flow and fetches the data for the
@@ -276,7 +337,30 @@ cdef class LogicalColumn:
             If the column is not length 1 (scalar columns always are).
         """
         cdef unique_ptr[scalar] scalar = self._handle.get_cudf_scalar()
-        return DeviceScalar.from_unique_ptr(move(scalar))
+        pylibcudf_scalar = PylibcudfScalar.from_libcudf(move(scalar))
+        return cudf.Scalar.from_pylibcudf(pylibcudf_scalar)
+
+    def __getitem__(self, slice_):
+        if not isinstance(slice_, slice):
+            raise TypeError("currently, LogicalColumn only supports simple slices.")
+
+        return LogicalColumn.from_handle(
+            self._handle.slice(from_python_slice(slice_))
+        )
+
+    def slice(self, slice_):
+        """Slice the column, same as `col[slice_]`.
+
+        Parameters
+        ----------
+        slice_ :
+            Python slice.  The return will be a view in the original data.
+
+        Returns
+        -------
+            The sliced logical column as a view.
+        """
+        return self[slice_]
 
     def repr(self, size_t max_num_items=30) -> str:
         """Return a printable representational string

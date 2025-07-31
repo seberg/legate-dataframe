@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <cudf/replace.hpp>
 
+#include <arrow/compute/api.h>
 #include <legate_dataframe/core/column.hpp>
 #include <legate_dataframe/core/library.hpp>
 #include <legate_dataframe/core/table.hpp>
@@ -32,9 +33,34 @@ namespace task {
 
 class ReplaceNullScalarTask : public Task<ReplaceNullScalarTask, OpCode::ReplaceNullsWithScalar> {
  public:
+  static inline const auto TASK_CONFIG =
+    legate::TaskConfig{legate::LocalTaskID{OpCode::ReplaceNullsWithScalar}};
+
+  static void cpu_variant(legate::TaskContext context)
+  {
+    TaskContext ctx{context};
+
+    const auto input = argument::get_next_input<PhysicalColumn>(ctx);
+    auto scalar_col  = argument::get_next_input<PhysicalColumn>(ctx);
+
+    auto arrow_input = input.arrow_array_view();
+
+    auto scalar = ARROW_RESULT(scalar_col.arrow_array_view()->GetScalar(0));
+    auto output = argument::get_next_output<PhysicalColumn>(ctx);
+
+    auto datum_result =
+      ARROW_RESULT(arrow::compute::CallFunction("coalesce", {arrow_input, scalar}));
+    if (get_prefer_eager_allocations()) {
+      output.copy_into(std::move(datum_result.make_array()));
+    } else {
+      output.move_into(std::move(datum_result.make_array()));
+    }
+  }
+
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const auto input = argument::get_next_input<PhysicalColumn>(ctx);
     auto scalar_col  = argument::get_next_input<PhysicalColumn>(ctx);
     auto output      = argument::get_next_output<PhysicalColumn>(ctx);
@@ -43,7 +69,11 @@ class ReplaceNullScalarTask : public Task<ReplaceNullScalarTask, OpCode::Replace
 
     auto ret = cudf::replace_nulls(input.column_view(), *cudf_scalar, ctx.stream(), ctx.mr());
 
-    output.move_into(std::move(ret));
+    if (get_prefer_eager_allocations()) {
+      output.copy_into(std::move(ret));
+    } else {
+      output.move_into(std::move(ret));
+    }
   }
 };
 
@@ -55,7 +85,10 @@ LogicalColumn replace_nulls(const LogicalColumn& col, const LogicalColumn& scala
   // Result needs to be nullable if the input is and the scalar is also.
   // NOTE: We possibly should bite the bullet here and check if the scalar is null
   // or not.  That is blocking, though.
-  auto ret = LogicalColumn::empty_like(col.cudf_type(), col.nullable() && scalar.nullable());
+  std::optional<size_t> size{};
+  if (get_prefer_eager_allocations()) { size = col.num_rows(); }
+  auto ret =
+    LogicalColumn::empty_like(col.cudf_type(), col.nullable() && scalar.nullable(), false, size);
   if (col.cudf_type() != scalar.cudf_type()) {
     throw std::invalid_argument("Scalar type does not match column type.");
   }
@@ -63,11 +96,13 @@ LogicalColumn replace_nulls(const LogicalColumn& col, const LogicalColumn& scala
     // NOTE: We could be graceful here and check if it has 1 rows.
     throw std::invalid_argument("Scalar column must be marked as scalar.");
   }
-  legate::AutoTask task = runtime->create_task(get_library(), task::ReplaceNullScalarTask::TASK_ID);
+  legate::AutoTask task =
+    runtime->create_task(get_library(), task::ReplaceNullScalarTask::TASK_CONFIG.task_id());
 
-  argument::add_next_input(task, col);
+  auto in_var = argument::add_next_input(task, col);
   argument::add_next_input(task, scalar, /* broadcast */ true);
-  argument::add_next_output(task, ret);
+  auto out_var = argument::add_next_output(task, ret);
+  if (size.has_value()) { task.add_constraint(legate::align(out_var, in_var)); }
 
   runtime->submit(std::move(task));
   return ret;
@@ -76,9 +111,9 @@ LogicalColumn replace_nulls(const LogicalColumn& col, const LogicalColumn& scala
 
 namespace {
 
-void __attribute__((constructor)) register_tasks()
-{
+const auto reg_id_ = []() -> char {
   legate::dataframe::task::ReplaceNullScalarTask::register_variants();
-}
+  return 0;
+}();
 
 }  // namespace

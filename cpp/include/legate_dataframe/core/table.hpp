@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include <arrow/api.h>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 
@@ -260,6 +261,22 @@ class LogicalTable {
   };
 
   /**
+   * @brief Slice the table by rows.
+   *
+   * @param slice A Legate slice into the table rows. Supports negative values,
+   * `Slice::OPEN`, and does not include stop index.
+   * @return The sliced table
+   */
+  [[nodiscard]] LogicalTable slice(const legate::Slice& slice) const
+  {
+    std::vector<LogicalColumn> new_cols;
+    for (auto&& col : columns_) {
+      new_cols.push_back(col.slice(slice));
+    }
+    return LogicalTable(std::move(new_cols), column_names_);
+  };
+
+  /**
    * @brief Offload all columns to the specified target memory.
    *
    * This method offloads the underlying data to the specified target memory.
@@ -299,6 +316,16 @@ class LogicalTable {
   std::unique_ptr<cudf::table> get_cudf(
     rmm::cuda_stream_view stream        = cudf::get_default_stream(),
     rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource()) const;
+
+  /**
+   * @brief Copy the logical table into a local arrow table
+
+   * This call blocks the client's control flow and fetches the data for the
+   * whole table to the current node.
+   *
+   * @return arrow table, which own the data
+   */
+  std::shared_ptr<arrow::Table> get_arrow() const;
 
   /**
    * @brief Return a printable representational string
@@ -356,6 +383,85 @@ class PhysicalTable {
   }
 
   /**
+   * @brief Creates an Arrow Table view using the specified column names.
+   *
+   * @param column_names
+   * @return std::shared_ptr<arrow::Table> A shared pointer to the newly created Arrow Table.
+   *
+   * @throws std::runtime_error If the number of provided column names does not match the number of
+   * columns.
+   */
+  std::shared_ptr<arrow::Table> arrow_table_view(const std::vector<std::string>& column_names) const
+  {
+    if (static_cast<std::size_t>(column_names.size()) != columns_.size()) {
+      throw std::runtime_error("LogicalTable.arrow_table_view(): number of columns mismatch " +
+                               std::to_string(columns_.size()) +
+                               " != " + std::to_string(column_names.size()));
+    }
+    std::vector<std::shared_ptr<arrow::Array>> cols;
+    cols.reserve(columns_.size());
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (std::size_t i = 0; i < columns_.size(); i++) {
+      const auto& col = columns_[i];
+      cols.push_back(col.arrow_array_view());
+      fields.push_back(arrow::field(column_names[i], col.arrow_type()));
+    }
+    return arrow::Table::Make(arrow::schema(fields), std::move(cols));
+  }
+
+  /**
+   * @brief Copy local cudf columns into this bound physical table
+   *
+   * Note: to save the copy use `move_into()` on an unbound table.
+   *
+   * @param columns The cudf columns to copy
+   */
+  void copy_into(std::vector<std::unique_ptr<cudf::column>> columns)
+  {
+    if (columns.size() != columns_.size()) {
+      throw std::runtime_error("LogicalTable.move_into(): number of columns mismatch " +
+                               std::to_string(columns_.size()) +
+                               " != " + std::to_string(columns.size()));
+    }
+    for (size_t i = 0; i < columns.size(); ++i) {
+      columns_[i].copy_into(std::move(columns[i]));
+    }
+  }
+
+  /**
+   * @brief Copy a local arrow table into this bound physical table
+   *
+   * Note: to save the copy use `move_into()` on an unbound table.
+   *
+   * @param table The arrow table to copy
+   */
+  void copy_into(std::shared_ptr<arrow::Table> table)
+  {
+    if (static_cast<std::size_t>(table->num_columns()) != columns_.size()) {
+      throw std::runtime_error("LogicalTable.move_into(): number of columns mismatch " +
+                               std::to_string(columns_.size()) +
+                               " != " + std::to_string(table->num_columns()));
+    }
+    // Component chunked arrays must be converted to contiguous arrays
+    auto combined = table->CombineChunks().ValueOrDie();
+    for (int i = 0; i < combined->num_columns(); ++i) {
+      auto chunked_array = combined->column(i);
+      std::shared_ptr<arrow::Array> contiguous_array;
+      if (chunked_array->num_chunks() == 0) { continue; }
+      columns_[i].copy_into(chunked_array->chunk(0));
+    }
+  }
+
+  /**
+   * @brief Copy local cudf table into this bound physical table
+   *
+   * Note: to save the copy use `move_into()` on an unbound table.
+   *
+   * @param table The cudf table to copy
+   */
+  void copy_into(std::unique_ptr<cudf::table> table) { copy_into(table->release()); }
+
+  /**
    * @brief Move local cudf columns into this unbound physical table
    *
    * @param columns The cudf columns to move
@@ -369,6 +475,31 @@ class PhysicalTable {
     }
     for (size_t i = 0; i < columns.size(); ++i) {
       columns_[i].move_into(std::move(columns[i]));
+    }
+  }
+
+  /**
+   * @brief Move local arrow arrays into this unbound physical table
+   *
+   * @param columns The arrow arrays to move
+   */
+  void move_into(std::shared_ptr<arrow::Table> table)
+  {
+    if (static_cast<std::size_t>(table->num_columns()) != columns_.size()) {
+      throw std::runtime_error("LogicalTable.move_into(): number of columns mismatch " +
+                               std::to_string(columns_.size()) +
+                               " != " + std::to_string(table->num_columns()));
+    }
+    // Component chunked arrays must be converted to contiguous arrays
+    auto combined = table->CombineChunks().ValueOrDie();
+    for (int i = 0; i < combined->num_columns(); ++i) {
+      auto chunked_array = combined->column(i);
+      std::shared_ptr<arrow::Array> contiguous_array;
+      if (chunked_array->num_chunks() == 0) {
+        columns_[i].bind_empty_data();
+        continue;
+      }
+      columns_[i].move_into(chunked_array->chunk(0));
     }
   }
 
@@ -429,6 +560,29 @@ class PhysicalTable {
     return dtypes;
   }
 
+  [[nodiscard]] std::vector<std::shared_ptr<arrow::DataType>> arrow_types() const
+  {
+    std::vector<std::shared_ptr<arrow::DataType>> dtypes;
+    for (const auto& col : columns_) {
+      dtypes.push_back(col.arrow_type());
+    }
+    return dtypes;
+  }
+
+  /**
+   * @brief Indicates whether the table is unbound
+   *
+   * A table is consider unbound if one of its columns is unbound.
+   *
+   * @return true The table is unbound
+   * @return false The table is bound
+   */
+  [[nodiscard]] bool unbound() const
+  {
+    // Assume the first column is correct for the whole table.
+    return columns_.front().unbound();
+  }
+
  private:
   std::vector<PhysicalColumn> columns_;
 };
@@ -469,7 +623,7 @@ std::vector<legate::Variable> add_next_input(legate::AutoTask& task,
 std::vector<legate::Variable> add_next_output(legate::AutoTask& task, const LogicalTable& tbl);
 
 template <>
-inline task::PhysicalTable get_next_input<task::PhysicalTable>(GPUTaskContext& ctx)
+inline task::PhysicalTable get_next_input<task::PhysicalTable>(TaskContext& ctx)
 {
   auto cudf_type_ids = get_next_scalar_vector<std::underlying_type_t<cudf::type_id>>(ctx);
 
@@ -483,7 +637,7 @@ inline task::PhysicalTable get_next_input<task::PhysicalTable>(GPUTaskContext& c
 }
 
 template <>
-inline task::PhysicalTable get_next_output<task::PhysicalTable>(GPUTaskContext& ctx)
+inline task::PhysicalTable get_next_output<task::PhysicalTable>(TaskContext& ctx)
 {
   auto cudf_type_ids = get_next_scalar_vector<std::underlying_type_t<cudf::type_id>>(ctx);
 

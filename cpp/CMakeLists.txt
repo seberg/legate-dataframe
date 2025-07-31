@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2023-2024, NVIDIA CORPORATION.
+# Copyright (c) 2023-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -70,17 +70,40 @@ include(cmake/Modules/ConfigureCUDA.cmake) # set other CUDA compilation flags
 # ##################################################################################################
 # * dependencies ----------------------------------------------------------------------------------
 
+# add third party dependencies using CPM
+rapids_cpm_init()
+
+# If CCCL versions don't get picked up correctly, we may need to add them early on here (right now
+# it seems fetching rmm/cudf manage to ensure we ge the right one.)
+include("${rapids-cmake-dir}/cpm/cccl.cmake")
+rapids_cpm_cccl()
+
+include(cmake/thirdparty/get_rmm.cmake)
+include(cmake/thirdparty/get_cudf.cmake)
+
 rapids_find_package(
   legate REQUIRED Legion LegionRuntime
   BUILD_EXPORT_SET LegateDataframe-exports
   INSTALL_EXPORT_SET LegateDataframe-exports
 )
 
-# add third party dependencies using CPM
-rapids_cpm_init()
+rapids_find_package(
+  Arrow REQUIRED
+  BUILD_EXPORT_SET LegateDataframe-exports
+  INSTALL_EXPORT_SET LegateDataframe-exports
+)
 
-include(cmake/thirdparty/get_rmm.cmake)
-include(cmake/thirdparty/get_cudf.cmake)
+rapids_find_package(
+  ArrowAcero REQUIRED
+  BUILD_EXPORT_SET LegateDataframe-exports
+  INSTALL_EXPORT_SET LegateDataframe-exports
+)
+
+rapids_find_package(
+  Parquet REQUIRED
+  BUILD_EXPORT_SET LegateDataframe-exports
+  INSTALL_EXPORT_SET LegateDataframe-exports
+)
 
 if(LegateDataframe_BUILD_TESTS)
   # find or install GoogleTest
@@ -109,13 +132,29 @@ set_target_properties(
              INTERFACE_POSITION_INDEPENDENT_CODE ON
 )
 
+# Need to add this define, as is done in legate CMakeLists.txt as well for __half support.  If
+# __half support fails elsewhere it may be needed there. This may be a CCCL 2.7.0 issue and become
+# unnecessary in the future.
+target_compile_definitions("LegateDataframe" PUBLIC _LIBCUDACXX_HAS_NVFP16=1)
+
+list(APPEND LDF_CUDA_FLAGS --expt-extended-lambda)
+list(APPEND LDF_CUDA_FLAGS --expt-relaxed-constexpr)
+
+target_compile_options(
+  LegateDataframe PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${LDF_CXX_FLAGS}>"
+                          "$<$<COMPILE_LANGUAGE:CUDA>:${LDF_CUDA_FLAGS}>"
+)
+
 target_include_directories(
   LegateDataframe
   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   INTERFACE "$<INSTALL_INTERFACE:include>"
 )
 
-target_link_libraries(LegateDataframe PUBLIC legate::legate rmm::rmm cudf::cudf)
+target_link_libraries(
+  LegateDataframe PUBLIC legate::legate rmm::rmm cudf::cudf Arrow::arrow_shared
+                         ArrowAcero::arrow_acero_shared Parquet::parquet_shared
+)
 
 # Add Conda library, and include paths if specified
 if(TARGET conda_env)

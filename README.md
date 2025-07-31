@@ -5,12 +5,14 @@ This is **not** a drop-in replacement of [Pandas](https://pandas.pydata.org/), i
 
 In the future, we plan to introduce a high-level pure Python package that implements all the nice-to-have features known from Pandas using the low-level API's primitives.
 
+[Python API and further documentation](https://rapidsai.github.io/legate-dataframe/).
+
 ## Install
 
 You can install `legate-dataframe` packages from the [conda legate channel](https://anaconda.org/legate/)
 using
 ```bash
-conda -c legate -c rapidsai -c conda-forge legate-dataframe
+conda install -c legate -c rapidsai -c conda-forge legate-dataframe
 ```
 To include development releases add the `legate/label/experimental` channel.
 
@@ -85,7 +87,7 @@ def main(tmpdir):
     # Then we can read the parquet files back into a logical table. We
     # provide a Glob string that reference all the parquet files that
     # should go into the logical table.
-    tbl2 = parquet_read(glob_string=f"{tmpdir}/*.parquet")
+    tbl2 = parquet_read(f"{tmpdir}/*.parquet")
 
     # LogicalColumn implements the `__legate_data_interface__` interface,
     # which makes it possible for other Legate libraries, such as cuPyNumeric,
@@ -118,6 +120,7 @@ if __name__ == "__main__":
 #include <legate_dataframe/core/table.hpp>
 #include <legate_dataframe/parquet.hpp>
 #include <legate_dataframe/unaryop.hpp>
+#include <legate_dataframe/utils.hpp>
 
 int main(int argc, char** argv)
 {
@@ -149,7 +152,8 @@ int main(int argc, char** argv)
   // Then we can read the parquet files back into a logical table. We
   // provide a Glob string that reference all the parquet files that
   // should go into the logical table.
-  auto tbl_b = legate::dataframe::parquet_read("./my_parquet_file/*.parquet");
+  auto files = legate::dataframe::parse_glob("./my_parquet_file/*.parquet");
+  auto tbl_b = legate::dataframe::parquet_read(files);
 
   // Clean up
   std::filesystem::remove_all("./my_parquet_file");

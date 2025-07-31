@@ -16,16 +16,19 @@
 
 #pragma once
 
+#include <arrow/api.h>
 #include <legate.h>
-
 #include <legate_dataframe/core/table.hpp>
 #include <legate_dataframe/core/task_context.hpp>
 
 namespace legate::dataframe::task {
 
+std::vector<std::shared_ptr<arrow::Table>> shuffle(
+  TaskContext& ctx, const std::vector<std::shared_ptr<arrow::Table>>& tbl_partitioned);
+
 std::pair<std::vector<cudf::table_view>,
           std::unique_ptr<std::pair<std::map<int, rmm::device_buffer>, cudf::table>>>
-shuffle(GPUTaskContext& ctx,
+shuffle(TaskContext& ctx,
         std::vector<cudf::table_view>& tbl_partitioned,
         std::unique_ptr<cudf::table> owning_table);
 
@@ -45,8 +48,12 @@ shuffle(GPUTaskContext& ctx,
  * @return The repartitioned table where the partition of each task hashes to the same
  */
 std::unique_ptr<cudf::table> repartition_by_hash(
-  GPUTaskContext& ctx,
+  TaskContext& ctx,
   const cudf::table_view& table,
   const std::vector<cudf::size_type>& columns_to_hash);
 
+std::shared_ptr<arrow::Table> repartition_by_hash(
+  TaskContext& ctx,
+  std::shared_ptr<arrow::Table> table,
+  const std::vector<cudf::size_type>& columns_to_hash);
 }  // namespace legate::dataframe::task

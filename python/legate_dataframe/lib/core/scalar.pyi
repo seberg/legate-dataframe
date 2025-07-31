@@ -6,8 +6,14 @@ import numbers
 import cudf
 import legate.core
 import numpy
-from cudf._lib.scalar import DeviceScalar
+import pyarrow as pa
+from pylibcudf.scalar import Scalar as PylibcudfScalar
 
 ScalarLike = (
-    numpy.number | numbers.Number | cudf.Scalar | legate.core.Scalar | DeviceScalar
+    numpy.number
+    | numbers.Number
+    | cudf.Scalar
+    | legate.core.Scalar
+    | PylibcudfScalar
+    | pa.Scalar
 )

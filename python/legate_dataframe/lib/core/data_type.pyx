@@ -4,18 +4,19 @@
 # distutils: language = c++
 # cython: language_level=3
 
-
-from cudf._lib.types cimport underlying_type_t_type_id
 from pylibcudf.libcudf.types cimport type_id
-from pylibcudf.types cimport DataType
 from pylibcudf.types cimport data_type as cpp_cudf_type
 
 import cudf
-from cudf._lib.types import PYLIBCUDF_TO_SUPPORTED_NUMPY_TYPES, dtype_to_pylibcudf_type
-from numpy.typing import DTypeLike
+import pyarrow as pa
+from cudf.utils.dtypes import (
+    PYLIBCUDF_TO_SUPPORTED_NUMPY_TYPES,
+    dtype_to_pylibcudf_type,
+)
+from pylibcudf.interop import from_arrow
 
 
-cdef cpp_cudf_type as_data_type(data_type_like: DTypeLike):
+cdef cpp_cudf_type as_data_type(data_type_like):
     """Get data type from object
 
     Parameters
@@ -27,9 +28,17 @@ cdef cpp_cudf_type as_data_type(data_type_like: DTypeLike):
     -------
         Coerced C++ cudf type.
     """
+    cdef DataType d_type
 
-    cdef DataType dtype = dtype_to_pylibcudf_type(cudf.dtype(data_type_like))
-    return dtype.c_obj
+    # arrow
+    if isinstance(data_type_like, pa.DataType):
+        data_type_like = from_arrow(data_type_like)
+
+    if isinstance(data_type_like, DataType):
+        d_type = data_type_like
+        return d_type.c_obj
+    d_type = dtype_to_pylibcudf_type(cudf.dtype(data_type_like))
+    return d_type.c_obj
 
 
 cdef cpp_cudf_type_to_cudf_dtype(cpp_cudf_type libcudf_type):
@@ -68,9 +77,7 @@ cdef cpp_cudf_type_to_cudf_dtype(cpp_cudf_type libcudf_type):
             scale=-libcudf_type.scale()
         )
     else:
-        return PYLIBCUDF_TO_SUPPORTED_NUMPY_TYPES[
-            <underlying_type_t_type_id>(tid)
-        ]
+        return PYLIBCUDF_TO_SUPPORTED_NUMPY_TYPES[tid]
 
 
 cdef bint is_legate_compatible(cpp_cudf_type libcudf_type):

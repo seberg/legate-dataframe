@@ -41,7 +41,7 @@ namespace {
  */
 std::pair<std::unique_ptr<rmm::device_uvector<cudf::size_type>>,
           std::unique_ptr<rmm::device_uvector<cudf::size_type>>>
-cudf_join(GPUTaskContext& ctx,
+cudf_join(TaskContext& ctx,
           cudf::table_view lhs,
           cudf::table_view rhs,
           const std::vector<int32_t>& lhs_keys,
@@ -102,7 +102,7 @@ std::pair<cudf::out_of_bounds_policy, cudf::out_of_bounds_policy> out_of_bounds_
  *
  * Note that `lhs_table` is only passed for cleanup.
  */
-void cudf_join_and_gather(GPUTaskContext& ctx,
+void cudf_join_and_gather(TaskContext& ctx,
                           cudf::table_view lhs,
                           cudf::table_view rhs,
                           const std::vector<int32_t> lhs_keys,
@@ -136,7 +136,12 @@ void cudf_join_and_gather(GPUTaskContext& ctx,
     cudf::gather(rhs.select(rhs_out_cols), right_indices_col, right_policy, ctx.stream(), ctx.mr());
 
   // Finally, create a vector of both the left and right results and move it into the output table
-  output.move_into(concat(left_result->release(), right_result->release()));
+  if (get_prefer_eager_allocations() &&
+      !output.unbound()) {  // hard to guess if bound so just inspect
+    output.copy_into(std::move(concat(left_result->release(), right_result->release())));
+  } else {
+    output.move_into(std::move(concat(left_result->release(), right_result->release())));
+  }
 }
 
 /**
@@ -157,7 +162,7 @@ std::unique_ptr<cudf::table> no_rows_table_like(const PhysicalTable& other)
  * The table is passed through on rank 0 and on the other ranks, an empty table is returned.
  * The `owners` argument is used to keep new cudf allocations alive
  */
-cudf::table_view revert_broadcast(GPUTaskContext& ctx,
+cudf::table_view revert_broadcast(TaskContext& ctx,
                                   const PhysicalTable& table,
                                   std::vector<std::unique_ptr<cudf::table>>& owners)
 {
@@ -175,7 +180,7 @@ cudf::table_view revert_broadcast(GPUTaskContext& ctx,
  * If legate broadcast the left- or right-hand side table, we might not need to
  * repartition them. This depends on the join type and which table is broadcasted.
  */
-bool is_repartition_not_needed(const GPUTaskContext& ctx,
+bool is_repartition_not_needed(const TaskContext& ctx,
                                JoinType join_type,
                                bool lhs_broadcasted,
                                bool rhs_broadcasted)
@@ -199,12 +204,16 @@ bool is_repartition_not_needed(const GPUTaskContext& ctx,
 
 class JoinTask : public Task<JoinTask, OpCode::Join> {
  public:
-  static constexpr auto GPU_VARIANT_OPTIONS =
-    legate::VariantOptions{}.with_has_allocations(true).with_concurrent(true);
+  static inline const auto TASK_CONFIG = legate::TaskConfig{legate::LocalTaskID{OpCode::Join}};
+
+  static constexpr auto GPU_VARIANT_OPTIONS = legate::VariantOptions{}
+                                                .with_has_allocations(true)
+                                                .with_concurrent(true)
+                                                .with_elide_device_ctx_sync(true);
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
     const auto lhs          = argument::get_next_input<PhysicalTable>(ctx);
     const auto rhs          = argument::get_next_input<PhysicalTable>(ctx);
     const auto lhs_keys     = argument::get_next_scalar_vector<int32_t>(ctx);
@@ -224,6 +233,7 @@ class JoinTask : public Task<JoinTask, OpCode::Join> {
 
     if (is_repartition_not_needed(ctx, join_type, lhs_broadcasted, rhs_broadcasted)) {
       cudf_join_and_gather(ctx,
+
                            lhs.table_view(),
                            rhs.table_view(),
                            lhs_keys,
@@ -243,6 +253,7 @@ class JoinTask : public Task<JoinTask, OpCode::Join> {
 
       auto lhs_view = cudf_lhs->view();  // cudf_lhs unique pointer is moved.
       cudf_join_and_gather(ctx,
+
                            lhs_view,
                            cudf_rhs->view(),
                            lhs_keys,
@@ -264,10 +275,13 @@ namespace {
 /**
  * @brief Help function to append empty columns like those in `table`.
  */
-void append_empty_like_columns(std::vector<LogicalColumn>& output, const LogicalTable& table)
+void append_empty_like_columns(std::vector<LogicalColumn>& output,
+                               const LogicalTable& table,
+                               std::optional<size_t> size = std::nullopt)
 {
   for (const auto& col : table.get_columns()) {
-    output.push_back(LogicalColumn::empty_like(col));
+    output.push_back(
+      LogicalColumn::empty_like(col.cudf_type(), col.nullable(), /* scalar */ false, size));
   }
 }
 
@@ -276,10 +290,11 @@ void append_empty_like_columns(std::vector<LogicalColumn>& output, const Logical
  * The empty columns are all nullable no matter the nullability of the columns in `table`
  */
 void append_empty_like_columns_force_nullable(std::vector<LogicalColumn>& output,
-                                              const LogicalTable& table)
+                                              const LogicalTable& table,
+                                              std::optional<size_t> size = std::nullopt)
 {
   for (const auto& col : table.get_columns()) {
-    output.push_back(LogicalColumn::empty_like(col.type(), true));
+    output.push_back(LogicalColumn::empty_like(col.cudf_type(), true, /* scalar */ false, size));
   }
 }
 }  // namespace
@@ -303,6 +318,7 @@ LogicalTable join(const LogicalTable& lhs,
 
   // Create an empty like table of the output columns
   std::vector<LogicalColumn> ret_cols;
+  bool output_is_eager_lhs_aligned = false;
   switch (join_type) {
     case JoinType::INNER: {
       append_empty_like_columns(ret_cols, lhs_out);
@@ -310,9 +326,14 @@ LogicalTable join(const LogicalTable& lhs,
       break;
     }
     case JoinType::LEFT: {
-      append_empty_like_columns(ret_cols, lhs_out);
-      // In a left join, the right columns might contain nulls even when `rhs` doesn't
-      append_empty_like_columns_force_nullable(ret_cols, rhs_out);
+      if (broadcast == BroadcastInput::RIGHT && get_prefer_eager_allocations()) {
+        output_is_eager_lhs_aligned = true;
+        append_empty_like_columns(ret_cols, lhs_out, lhs.num_rows());
+        append_empty_like_columns_force_nullable(ret_cols, rhs_out, lhs.num_rows());
+      } else {
+        append_empty_like_columns(ret_cols, lhs_out);
+        append_empty_like_columns_force_nullable(ret_cols, rhs_out);
+      }
       break;
     }
     case JoinType::FULL: {
@@ -331,12 +352,13 @@ LogicalTable join(const LogicalTable& lhs,
   auto ret_names = concat(lhs_out.get_column_name_vector(), rhs_out.get_column_name_vector());
   auto ret       = LogicalTable(std::move(ret_cols), std::move(ret_names));
 
-  legate::AutoTask task = runtime->create_task(get_library(), task::JoinTask::TASK_ID);
+  legate::AutoTask task =
+    runtime->create_task(get_library(), task::JoinTask::TASK_CONFIG.task_id());
   // TODO: While legate may broadcast some arrays, it would be good to add
   //       a heuristic (e.g. based on the fact that we need to do copies
   //       anyway, so the broadcast may actually copy less).
   //       That could be done here, in a mapper, or within the task itself.
-  argument::add_next_input(task, lhs, broadcast == BroadcastInput::LEFT);
+  auto lhs_vars = argument::add_next_input(task, lhs, broadcast == BroadcastInput::LEFT);
   argument::add_next_input(task, rhs, broadcast == BroadcastInput::RIGHT);
   argument::add_next_scalar_vector(task, std::vector<int32_t>(lhs_keys.begin(), lhs_keys.end()));
   argument::add_next_scalar_vector(task, std::vector<int32_t>(rhs_keys.begin(), rhs_keys.end()));
@@ -347,7 +369,14 @@ LogicalTable join(const LogicalTable& lhs,
     task, std::vector<int32_t>(lhs_out_columns.begin(), lhs_out_columns.end()));
   argument::add_next_scalar_vector(
     task, std::vector<int32_t>(rhs_out_columns.begin(), rhs_out_columns.end()));
-  argument::add_next_output(task, ret);
+  auto output_vars = argument::add_next_output(task, ret);
+
+  if (output_is_eager_lhs_aligned) {
+    for (auto& var : output_vars) {
+      task.add_constraint(legate::align(var, lhs_vars.at(0)));
+    }
+  }
+
   if (broadcast == BroadcastInput::AUTO) {
     task.add_communicator("nccl");
   } else if (join_type == JoinType::FULL ||
@@ -429,9 +458,9 @@ LogicalTable join(const LogicalTable& lhs,
 
 namespace {
 
-void __attribute__((constructor)) register_tasks()
-{
+const auto reg_id_ = []() -> char {
   legate::dataframe::task::JoinTask::register_variants();
-}
+  return 0;
+}();
 
 }  // namespace

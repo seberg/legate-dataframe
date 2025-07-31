@@ -29,12 +29,13 @@ namespace {
 static const char* library_name = "test.global_row_offset";
 
 struct GlobalRowOffsetTask : public legate::LegateTask<GlobalRowOffsetTask> {
-  static constexpr auto TASK_ID             = legate::LocalTaskID{0};
+  static inline const auto TASK_CONFIG      = legate::TaskConfig{legate::LocalTaskID{0}};
   static constexpr auto GPU_VARIANT_OPTIONS = legate::VariantOptions{}.with_has_allocations(true);
 
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     auto tbl                               = argument::get_next_input<task::PhysicalTable>(ctx);
     auto output                            = argument::get_next_output<task::PhysicalColumn>(ctx);
     std::vector<task::PhysicalColumn> cols = tbl.release();
@@ -51,7 +52,7 @@ struct GlobalRowOffsetTask : public legate::LegateTask<GlobalRowOffsetTask> {
 };
 
 struct TaskArgumentMix : public legate::LegateTask<TaskArgumentMix> {
-  static constexpr auto TASK_ID             = legate::LocalTaskID{1};
+  static inline const auto TASK_CONFIG      = legate::TaskConfig{legate::LocalTaskID{1}};
   static constexpr auto GPU_VARIANT_OPTIONS = legate::VariantOptions{}.with_has_allocations(true);
 
   static void gpu_variant(legate::TaskContext context)
@@ -62,7 +63,8 @@ struct TaskArgumentMix : public legate::LegateTask<TaskArgumentMix> {
     // NB: `get_task_argument_indices()` must be called *after* all the
     //     legate-dataframe arguments has been retrieved.
 
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     {
       auto [scalar_idx, input_idx, output_idx] = ctx.get_task_argument_indices();
       EXPECT_EQ(scalar_idx, 0);
@@ -110,10 +112,11 @@ legate::Library get_library()
 void check_global_row_offset(LogicalTable& input)
 {
   auto runtime = legate::Runtime::get_runtime();
-  auto task    = runtime->create_task(get_library(), GlobalRowOffsetTask::TASK_ID);
+  auto task    = runtime->create_task(get_library(), GlobalRowOffsetTask::TASK_CONFIG.task_id());
 
   // Launch task
-  LogicalColumn res = LogicalColumn::empty_like(legate::int64(), /* nullable = */ false);
+  LogicalColumn res =
+    LogicalColumn::empty_like(cudf::data_type{cudf::type_id::INT64}, /* nullable = */ false);
   argument::add_next_input(task, input);
   argument::add_next_output(task, res);
   argument::add_next_scalar(task, input.num_rows());
@@ -172,7 +175,7 @@ TEST(TaskTest, GlobalRowOffsetEmpty)
 TEST(TaskTest, TaskArgumentMix)
 {
   auto runtime = legate::Runtime::get_runtime();
-  auto task    = runtime->create_task(get_library(), TaskArgumentMix::TASK_ID);
+  auto task    = runtime->create_task(get_library(), TaskArgumentMix::TASK_CONFIG.task_id());
 
   auto input     = sequence(100, 0);
   auto output    = LogicalColumn::empty_like(input);

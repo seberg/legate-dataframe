@@ -22,6 +22,13 @@
 #include <legate_dataframe/core/library.hpp>
 
 namespace legate::dataframe {
+
+auto GetLogger() -> Legion::Logger&
+{
+  static Legion::Logger logger("legate_dataframe");
+  return logger;
+}
+
 namespace task {
 
 legate::TaskRegistrar& Registry::get_registrar()
@@ -34,8 +41,6 @@ legate::TaskRegistrar& Registry::get_registrar()
 namespace {
 
 constexpr auto library_name = "legate_dataframe";
-
-Legion::Logger logger(library_name);
 
 class Mapper : public legate::mapping::Mapper {
  public:
@@ -58,6 +63,8 @@ class Mapper : public legate::mapping::Mapper {
       for (const legate::mapping::Store& store : ary.stores()) {
         mappings.push_back(
           StoreMapping::default_mapping(store, options.front(), /*exact = */ true));
+        mappings.back().policy().ordering.set_c_order();
+        mappings.back().policy().exact = true;
       }
     }
     for (const legate::mapping::Array& ary : task.outputs()) {
@@ -65,6 +72,8 @@ class Mapper : public legate::mapping::Mapper {
       for (const legate::mapping::Store& store : ary.stores()) {
         mappings.push_back(
           StoreMapping::default_mapping(store, options.front(), /*exact = */ true));
+        mappings.back().policy().ordering.set_c_order();
+        mappings.back().policy().exact = true;
       }
     }
     return mappings;
@@ -123,21 +132,27 @@ class Mapper : public legate::mapping::Mapper {
 
 legate::Library create_and_registrate_library()
 {
-  const char* env = std::getenv("LDF_DISABLE_GLOBAL_MEMORY_RESOURCE");
-  if (env == nullptr || std::string{env} == "0") {
-    GlobalMemoryResource::set_as_default_mmr_resource();
+  auto runtime = legate::Runtime::get_runtime();
+
+  if (runtime->get_machine().count(legate::mapping::TaskTarget::GPU) > 0) {
+    // If we are running on a GPU, we should set the global RMM memory resource
+    // to hook into more/most allocations triggered via libcudf.
+    const char* env = std::getenv("LDF_DISABLE_GLOBAL_MEMORY_RESOURCE");
+    if (env == nullptr || std::string{env} == "0") {
+      GlobalMemoryResource::set_as_default_mmr_resource();
+    }
   }
   // Set with_has_allocations globally since currently all tasks allocate (and libcudf may also)
-  auto options = legate::VariantOptions{}.with_has_allocations(true);
-  auto context =
-    legate::Runtime::get_runtime()->find_or_create_library(library_name,
-                                                           legate::ResourceConfig{},
-                                                           std::make_unique<Mapper>(),
-                                                           {{legate::VariantCode::CPU, options},
-                                                            {legate::VariantCode::GPU, options},
-                                                            {legate::VariantCode::OMP, options}});
+  auto options =
+    legate::VariantOptions{}.with_has_allocations(true).with_elide_device_ctx_sync(true);
+  auto context = runtime->find_or_create_library(library_name,
+                                                 legate::ResourceConfig{},
+                                                 std::make_unique<Mapper>(),
+                                                 {{legate::VariantCode::CPU, options},
+                                                  {legate::VariantCode::GPU, options},
+                                                  {legate::VariantCode::OMP, options}});
   task::Registry::get_registrar().register_all_tasks(context);
-  return legate::Runtime::get_runtime()->find_library(legate::dataframe::library_name);
+  return runtime->find_library(legate::dataframe::library_name);
 }
 
 }  // namespace
@@ -146,6 +161,15 @@ legate::Library& get_library()
 {
   static legate::Library library = create_and_registrate_library();
   return library;
+}
+
+bool get_prefer_eager_allocations()
+{
+  static const bool prefer_eager_allocations = []() {
+    const char* env = std::getenv("LDF_PREFER_EAGER_ALLOCATIONS");
+    return env != nullptr && std::string(env) == "1";
+  }();
+  return prefer_eager_allocations;
 }
 
 }  // namespace legate::dataframe

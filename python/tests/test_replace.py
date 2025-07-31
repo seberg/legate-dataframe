@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import cudf
@@ -6,7 +6,12 @@ import pytest
 
 from legate_dataframe import LogicalColumn
 from legate_dataframe.lib.replace import replace_nulls
-from legate_dataframe.testing import assert_frame_equal, get_column_set
+from legate_dataframe.testing import (
+    assert_frame_equal,
+    assert_matches_polars,
+    get_column_set,
+    get_pyarrow_column_set,
+)
 
 
 @pytest.mark.parametrize(
@@ -14,10 +19,9 @@ from legate_dataframe.testing import assert_frame_equal, get_column_set
 )
 def test_column_replace_null(cudf_column):
     col = LogicalColumn.from_cudf(cudf_column)
-    value = cudf.Scalar(1, dtype=cudf_column.dtype)
 
-    expected = cudf_column.fillna(value)
-    res = replace_nulls(col, value)
+    expected = cudf_column.fillna(1)
+    res = replace_nulls(col, cudf.Scalar(1, dtype=cudf_column.dtype))
 
     assert_frame_equal(res, expected)
 
@@ -33,3 +37,14 @@ def test_column_replace_null_with_null(cudf_column):
     res = replace_nulls(col, value)
     # The result should be the same as the input
     assert_frame_equal(res, col)
+
+
+@pytest.mark.parametrize(
+    "arrow_column", get_pyarrow_column_set(["int32", "float32", "int64"])
+)
+def test_column_replace_null_polars(arrow_column):
+    pl = pytest.importorskip("polars")
+
+    df = pl.DataFrame({"a": arrow_column}).lazy()
+    q = df.with_columns(filled=pl.col("a").fill_null(1))
+    assert_matches_polars(q)

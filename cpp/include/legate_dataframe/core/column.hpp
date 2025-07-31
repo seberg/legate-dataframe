@@ -20,6 +20,8 @@
 #include <stdexcept>
 #include <string>
 
+#include <arrow/api.h>
+
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/scalar/scalar.hpp>
@@ -80,6 +82,80 @@ class LogicalColumn {
     }
   }
 
+  /*
+   * Convenience constructor for tests
+   */
+  template <typename T>
+  LogicalColumn(const std::vector<T>& data,
+                const std::vector<bool>& null_mask                  = {},
+                bool scalar                                         = false,
+                typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr)
+  {
+    const size_t nbytes   = data.size() * sizeof(T);
+    auto runtime          = legate::Runtime::get_runtime();
+    auto legate_type_code = legate::type_code_of_v<T>;
+    auto data_store =
+      runtime->create_store({data.size()}, legate::primitive_type(legate_type_code), false);
+    auto ptr = data_store.get_physical_store().template write_accessor<T, 1, false>().ptr(0);
+    std::copy(data.begin(), data.end(), ptr);
+
+    if (null_mask.empty()) {
+      array_ = std::move(legate::LogicalArray(data_store));
+    } else {
+      auto null_mask_store = runtime->create_store({data.size()}, legate::bool_(), false);
+      auto null_mask_ptr =
+        null_mask_store.get_physical_store().template write_accessor<bool, 1, false>().ptr(0);
+      std::copy(null_mask.begin(), null_mask.end(), null_mask_ptr);
+      array_ = std::move(legate::LogicalArray(data_store, null_mask_store));
+    }
+    scalar_    = scalar;
+    cudf_type_ = cudf::data_type{to_cudf_type_id(legate_type_code)};
+  }
+
+  /*
+   * Convenience constructor for tests
+   */
+  LogicalColumn(const std::vector<std::string>& data,
+                const std::vector<bool>& null_mask = {},
+                bool scalar                        = false)
+  {
+    auto runtime       = legate::Runtime::get_runtime();
+    std::size_t nbytes = 0;
+    std::vector<std::size_t> offsets(1);
+    for (const auto& str : data) {
+      nbytes += str.size();
+      offsets.push_back(nbytes);
+    }
+    // Create store for ranges
+    auto ranges_store = runtime->create_store({data.size()}, legate::rect_type(1), false);
+    auto data_store   = runtime->create_store({nbytes}, legate::int8(), false);
+
+    // Copy the data
+    auto data_ptr =
+      data_store.get_physical_store().template write_accessor<int8_t, 1, false>().ptr(0);
+    auto ranges_ptr =
+      ranges_store.get_physical_store().template write_accessor<legate::Rect<1>, 1, false>().ptr(0);
+    for (size_t i = 0; i < data.size(); ++i) {
+      std::copy(data[i].data(), data[i].data() + data[i].size(), data_ptr + offsets[i]);
+      ranges_ptr[i] = legate::Rect<1>(offsets[i], offsets[i + 1] - 1);
+    }
+
+    if (null_mask.empty()) {
+      array_ = runtime->create_string_array(legate::LogicalArray(ranges_store),
+                                            legate::LogicalArray(data_store));
+    } else {
+      auto null_mask_store = runtime->create_store({data.size()}, legate::bool_(), false);
+
+      auto null_mask_ptr =
+        null_mask_store.get_physical_store().template write_accessor<bool, 1, false>().ptr(0);
+      std::copy(null_mask.begin(), null_mask.end(), null_mask_ptr);
+      array_ = runtime->create_string_array(legate::LogicalArray(ranges_store, null_mask_store),
+                                            legate::LogicalArray(data_store));
+    }
+    scalar_    = scalar;
+    cudf_type_ = cudf::data_type{cudf::type_id::STRING};
+  }
+
   /**
    * @brief Create a column from a local cudf column
    *
@@ -91,6 +167,27 @@ class LogicalColumn {
    */
   LogicalColumn(cudf::column_view cudf_col,
                 rmm::cuda_stream_view stream = cudf::get_default_stream());
+
+  /**
+   * @brief Create a column from a local arrow array
+   *
+   * This call blocks the client's control flow and scatter the data to all
+   * legate nodes.
+   *
+   * @param arrow_array The local arrow array to copy into a logical column
+   */
+  LogicalColumn(std::shared_ptr<arrow::Array> arrow_array);
+
+  /**
+   * @brief Create a scalar column from a local arrow scalar
+   *
+   * This call blocks the client's control flow and scatter the data to all
+   * legate nodes.
+   * This column will be marked and treated as scalar.
+   *
+   * @param arrow_scalar The local arrow scalar to copy into a logical column
+   */
+  LogicalColumn(std::shared_ptr<arrow::Scalar> arrow_scalar);
 
   /**
    * @brief Create a scalar column from a local cudf scalar
@@ -106,7 +203,7 @@ class LogicalColumn {
                 rmm::cuda_stream_view stream = cudf::get_default_stream());
 
   /**
-   * @brief Create a new unbounded column from an existing column
+   * @brief Create a new column from an existing column
    *
    * This function always returns a non-scalar column, even if the input was
    * considered scalar.  Functions that wish to propagate scalar information
@@ -141,27 +238,25 @@ class LogicalColumn {
    *
    * @param dtype The data type of the new column
    * @param nullable The nullable of the new column
-   * @return The new unbounded column
-   */
-  static LogicalColumn empty_like(const legate::Type& dtype, bool nullable, bool scalar = false)
-  {
-    return LogicalColumn(legate::Runtime::get_runtime()->create_array(dtype, 1, nullable));
-  }
-
-  /**
-   * @brief Create a new unbounded column from dtype and nullable
-   *
-   * @param dtype The data type of the new column
-   * @param nullable The nullable of the new column
    * @param scalar Whether the result is a scalar column.
    * @return The new unbounded column
    */
-  static LogicalColumn empty_like(cudf::data_type dtype, bool nullable, bool scalar = false)
+  static LogicalColumn empty_like(cudf::data_type dtype,
+                                  bool nullable,
+                                  bool scalar                = false,
+                                  std::optional<size_t> size = std::nullopt)
   {
-    return LogicalColumn(
-      legate::Runtime::get_runtime()->create_array(to_legate_type(dtype.id()), 1, nullable),
-      dtype,
-      scalar);
+    if (!size.has_value()) {
+      return LogicalColumn(
+        legate::Runtime::get_runtime()->create_array(to_legate_type(dtype.id()), 1, nullable),
+        dtype,
+        scalar);
+    } else {
+      return LogicalColumn(legate::Runtime::get_runtime()->create_array(
+                             Shape{size.value()}, to_legate_type(dtype.id()), nullable),
+                           dtype,
+                           scalar);
+    }
   }
 
  public:
@@ -201,6 +296,16 @@ class LogicalColumn {
   std::unique_ptr<cudf::column> get_cudf(
     rmm::cuda_stream_view stream        = cudf::get_default_stream(),
     rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource()) const;
+
+  /**
+   * @brief Copy the logical column into a local arrow array
+   *
+   * This call blocks the client's control flow and fetches the data for the
+   * whole column to the current node.
+   *
+   * @return arrow array, which own the data
+   */
+  std::shared_ptr<arrow::Array> get_arrow() const;
 
   /**
    * @brief Copy the logical column into a local cudf scalar
@@ -255,6 +360,16 @@ class LogicalColumn {
   [[nodiscard]] cudf::data_type cudf_type() const { return cudf_type_; }
 
   /**
+   * @brief Get the arrow data type of the column
+   *
+   * @return The arrow data type
+   */
+  [[nodiscard]] std::shared_ptr<arrow::DataType> arrow_type() const
+  {
+    return to_arrow_type(cudf_type_.id());
+  }
+
+  /**
    * @brief Indicates whether the array is nullable
    *
    * @return true The array is nullable
@@ -300,6 +415,15 @@ class LogicalColumn {
    */
   std::string repr(size_t max_num_items = 30) const;
 
+  /**
+   * @brief Slice the column
+   *
+   * @param slice The Legate slice into the column.  Supports negative values,
+   * `Slice::OPEN`, and does not include stop index.
+   * @return The sliced column
+   */
+  [[nodiscard]] LogicalColumn slice(const legate::Slice& slice) const;
+
  private:
   // In order to support a default ctor and assignment (used by Cython),
   // we make the legate array optional and the rest non-const.
@@ -326,7 +450,7 @@ class PhysicalColumn {
    * column is part of. Use a negative value to indicate that the number of rows is
    * unknown.
    */
-  PhysicalColumn(GPUTaskContext& ctx,
+  PhysicalColumn(TaskContext& ctx,
                  legate::PhysicalArray array,
                  cudf::data_type cudf_type,
                  bool scalar_out = false)
@@ -347,15 +471,18 @@ class PhysicalColumn {
   /**
    * @brief Indicates whether the column is unbound or not
    *
+   * For string columns the underlying characters will be (or can be) unbound
+   * even if the ranges are bound.
+   *
    * @return true The column is unbound
    * @return false The column is bound
    */
   [[nodiscard]] bool unbound() const
   {
-    // If one of the underlying stores are unbound, the column as a whole is unbound.
-    // TODO: cache this value
-    const std::vector<legate::PhysicalStore> ss = get_stores(array_);
-    return std::any_of(ss.cbegin(), ss.cend(), [](const auto& s) { return s.is_unbound_store(); });
+    if (!array_.nested()) { return array_.data().is_unbound_store(); }
+    // New string columns won't really have bound characters so only check ranges.
+    // (only nested dtypes we have right now)
+    return array_.as_string_array().ranges().data().is_unbound_store();
   }
 
   /**
@@ -371,6 +498,11 @@ class PhysicalColumn {
    * @return The cudf data type
    */
   [[nodiscard]] cudf::data_type cudf_type() const { return cudf_type_; }
+
+  [[nodiscard]] std::shared_ptr<arrow::DataType> arrow_type() const
+  {
+    return to_arrow_type(cudf_type_.id());
+  }
 
   /**
    * @brief Indicates whether the column is nullable
@@ -443,6 +575,7 @@ class PhysicalColumn {
    */
   cudf::column_view column_view() const;
 
+  std::shared_ptr<arrow::Array> arrow_array_view() const;
   /**
    * @brief Return a cudf scalar for physical column
    *
@@ -468,6 +601,27 @@ class PhysicalColumn {
                    size_t max_num_items = 30) const;
 
   /**
+   * @brief Copy local cudf column into this unbound physical column
+   *
+   * @param column The cudf column to copy
+   */
+  void copy_into(std::unique_ptr<cudf::column> column);
+
+  /**
+   * @brief Copy local cudf scalar into this bound physical column
+   *
+   * @param scalar The cudf scalar to copy
+   */
+  void copy_into(std::unique_ptr<cudf::scalar> scalar);
+
+  /**
+   * @brief Copy local arrow array into this unbound physical column
+   *
+   * @param column The arrow array to copy
+   */
+  void copy_into(std::shared_ptr<arrow::Array> column);
+
+  /**
    * @brief Move local cudf column into this unbound physical column
    *
    * @param column The cudf column to move
@@ -482,12 +636,19 @@ class PhysicalColumn {
   void move_into(std::unique_ptr<cudf::scalar> scalar);
 
   /**
+   * @brief Move arrow array into this unbound physical column
+   *
+   * @param column The arrow array to move
+   */
+  void move_into(std::shared_ptr<arrow::Array> column);
+
+  /**
    * @brief Makes the unbound column empty. Valid only when the column is unbound.
    */
   void bind_empty_data() const;
 
  private:
-  GPUTaskContext* ctx_;
+  TaskContext* ctx_;
   legate::PhysicalArray array_;
   const cudf::data_type cudf_type_;
   mutable std::vector<std::unique_ptr<cudf::column>> tmp_cols_;
@@ -529,7 +690,7 @@ legate::Variable add_next_input(legate::AutoTask& task,
 legate::Variable add_next_output(legate::AutoTask& task, const LogicalColumn& col);
 
 template <>
-inline task::PhysicalColumn get_next_input<task::PhysicalColumn>(GPUTaskContext& ctx)
+inline task::PhysicalColumn get_next_input<task::PhysicalColumn>(TaskContext& ctx)
 {
   auto cudf_type_id = static_cast<cudf::type_id>(
     argument::get_next_scalar<std::underlying_type_t<cudf::type_id>>(ctx));
@@ -537,7 +698,7 @@ inline task::PhysicalColumn get_next_input<task::PhysicalColumn>(GPUTaskContext&
 }
 
 template <>
-inline task::PhysicalColumn get_next_output<task::PhysicalColumn>(GPUTaskContext& ctx)
+inline task::PhysicalColumn get_next_output<task::PhysicalColumn>(TaskContext& ctx)
 {
   auto cudf_type_id = static_cast<cudf::type_id>(
     argument::get_next_scalar<std::underlying_type_t<cudf::type_id>>(ctx));

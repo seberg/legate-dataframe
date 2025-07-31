@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <arrow/compute/api.h>
 #include <cudf/types.hpp>
 #include <legate.h>
 
@@ -31,9 +32,35 @@ namespace task {
 
 class ApplyBooleanMaskTask : public Task<ApplyBooleanMaskTask, OpCode::ApplyBooleanMask> {
  public:
+  static inline const auto TASK_CONFIG =
+    legate::TaskConfig{legate::LocalTaskID{OpCode::ApplyBooleanMask}};
+
+  static void cpu_variant(legate::TaskContext context)
+  {
+    TaskContext ctx{context};
+
+    const auto tbl          = argument::get_next_input<PhysicalTable>(ctx);
+    const auto boolean_mask = argument::get_next_input<PhysicalColumn>(ctx);
+    auto output             = argument::get_next_output<PhysicalTable>(ctx);
+
+    std::vector<std::string> dummy_column_names;
+    for (int i = 0; i < tbl.num_columns(); i++) {
+      dummy_column_names.push_back(std::to_string(i));
+    }
+
+    auto result =
+      ARROW_RESULT(
+        arrow::compute::CallFunction(
+          "filter", {tbl.arrow_table_view(dummy_column_names), boolean_mask.arrow_array_view()}))
+        .table();
+
+    output.move_into(std::move(result));
+  }
+
   static void gpu_variant(legate::TaskContext context)
   {
-    GPUTaskContext ctx{context};
+    TaskContext ctx{context};
+
     const auto tbl    = argument::get_next_input<PhysicalTable>(ctx);
     auto boolean_mask = argument::get_next_input<PhysicalColumn>(ctx);
     auto output       = argument::get_next_output<PhysicalTable>(ctx);
@@ -55,7 +82,8 @@ LogicalTable apply_boolean_mask(const LogicalTable& tbl, const LogicalColumn& bo
     throw std::invalid_argument("boolean mask column must have a bool dtype.");
   }
 
-  legate::AutoTask task = runtime->create_task(get_library(), task::ApplyBooleanMaskTask::TASK_ID);
+  legate::AutoTask task =
+    runtime->create_task(get_library(), task::ApplyBooleanMaskTask::TASK_CONFIG.task_id());
 
   argument::add_next_input(task, tbl);
   argument::add_next_input(task, boolean_mask);
@@ -68,9 +96,9 @@ LogicalTable apply_boolean_mask(const LogicalTable& tbl, const LogicalColumn& bo
 
 namespace {
 
-void __attribute__((constructor)) register_tasks()
-{
+const auto reg_id_ = []() -> char {
   legate::dataframe::task::ApplyBooleanMaskTask::register_variants();
-}
+  return 0;
+}();
 
 }  // namespace

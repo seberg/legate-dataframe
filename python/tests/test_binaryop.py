@@ -12,85 +12,138 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import cudf
-import cupy
+import operator
+
 import legate.core
+import numpy as np
+import pyarrow as pa
 import pytest
-from cudf._lib.binaryop import binaryop as cudf_binaryop
 
 from legate_dataframe import LogicalColumn
-from legate_dataframe.lib.binaryop import binary_operation, binary_operator
-from legate_dataframe.testing import assert_frame_equal, get_column_set
-
-
-def gen_random_series(nelem: int, num_nans: int) -> cudf.Series:
-    a = cupy.random.random(nelem)
-    a[cupy.random.choice(a.size, num_nans, replace=False)] = cupy.nan
-    return cudf.Series(a, nan_as_null=True)
-
-
-@pytest.mark.parametrize(
-    "op",
-    [
-        binary_operator.ADD,
-        binary_operator.SUB,
-        binary_operator.MUL,
-        binary_operator.DIV,
-        binary_operator.MOD,
-        binary_operator.POW,
-    ],
+from legate_dataframe.lib.binaryop import binary_operation
+from legate_dataframe.testing import (
+    assert_matches_polars,
+    gen_random_series,
+    get_pyarrow_column_set,
 )
-def test_arithmetic_operations(op: binary_operator):
+
+ops = ["add", "subtract", "multiply"]
+ops_logical = [
+    "and",
+    "or",
+    "and_kleene",
+    "or_kleene",
+]
+ops_comparison = [
+    "equal",
+    "not_equal",
+    "less",
+    "less_equal",
+    "greater",
+    "greater_equal",
+]
+
+
+@pytest.mark.parametrize("op", ops)
+def test_arithmetic_operations(op: str):
     a = gen_random_series(nelem=1000, num_nans=10)
     b = gen_random_series(nelem=1000, num_nans=10)
-    lg_a = LogicalColumn.from_cudf(a._column)
-    lg_b = LogicalColumn.from_cudf(b._column)
+    lg_a = LogicalColumn.from_arrow(a)
+    lg_b = LogicalColumn.from_arrow(b)
 
-    res = binary_operation(lg_a, lg_b, op, a.dtype)
-    expect = getattr(a, op.name.lower())(b)
+    res = binary_operation(lg_a, lg_b, op, np.float64)
+    expect = pa.compute.call_function(op, [a, b])
+    assert expect == res.to_arrow()
 
-    assert_frame_equal(res, expect, default_column_name="col0")
+
+@pytest.mark.parametrize("op", ops_logical + ops_comparison)
+def test_bool_out_operations(op: str):
+    a = gen_random_series(nelem=1000, num_nans=10)
+    b = gen_random_series(nelem=1000, num_nans=10)
+    lg_a = LogicalColumn.from_arrow(a)
+    lg_b = LogicalColumn.from_arrow(b)
+
+    res = binary_operation(lg_a, lg_b, op, "bool")
+    if op in ops_logical:
+        expect = pa.compute.call_function(op, [a.cast("bool"), b.cast("bool")])
+    else:
+        expect = pa.compute.call_function(op, [a, b])
+    assert expect == res.to_arrow()
 
 
-@pytest.mark.parametrize(
-    "op",
-    [
-        binary_operator.ADD,
-        binary_operator.SUB,
-        binary_operator.MUL,
-        binary_operator.DIV,
-        binary_operator.POW,
-    ],
-)
-@pytest.mark.parametrize("cudf_column", get_column_set(["int32", "float32", "int64"]))
+@pytest.mark.parametrize("op", ops)
+@pytest.mark.parametrize("array", get_pyarrow_column_set(["int32", "float32", "int64"]))
 @pytest.mark.parametrize(
     "scalar",
     [
-        cudf.Scalar(None, dtype="int32"),
-        cudf.Scalar(42, dtype="int64"),
-        cudf.Scalar(42, dtype="float64"),
-        cudf.Scalar(-42, dtype="float32"),
+        pa.scalar(None, type="int32"),
+        pa.scalar(42, type="int64"),
+        pa.scalar(42, type="float64"),
+        pa.scalar(-42, type="float32"),
         42,
         -42.0,
         legate.core.Scalar(42, dtype=legate.core.types.int64),
         legate.core.Scalar(-42, dtype=legate.core.types.float16),
     ],
 )
-def test_scalar_input(cudf_column, op, scalar):
-    op_str = f"__{op.name.lower()}__"
-    col = LogicalColumn.from_cudf(cudf_column)
-    if isinstance(scalar, legate.core.Scalar):
-        cudf_scalar = scalar.value()  # cudf doesn't understand legate's scalars
-    else:
-        cudf_scalar = scalar
+def test_scalar_input(array, op, scalar):
+    col = LogicalColumn.from_arrow(array)
 
-    res = binary_operation(col, scalar, op, cudf_column.dtype)
-    expect = cudf_binaryop(cudf_column, cudf_scalar, op_str, cudf_column.dtype)
-    assert_frame_equal(res, expect)
+    res = binary_operation(col, scalar, op, array.type)
 
-    res = binary_operation(scalar, col, op, cudf_column.dtype)
-    expect = cudf_binaryop(cudf_scalar, cudf_column, op_str, cudf_column.dtype)
-    assert_frame_equal(res, expect)
+    pa_scalar = (
+        pa.scalar(scalar.value())
+        if isinstance(scalar, legate.core.Scalar)
+        else pa.scalar(scalar)
+    )
+    expect = pa.compute.call_function(op, [array, pa_scalar]).cast(array.type)
+    assert expect == res.to_arrow()
 
-    result = binary_operation(scalar, scalar, op, cudf_column.dtype)
+    res = binary_operation(scalar, col, op, array.type)
+    expect = pa.compute.call_function(op, [pa_scalar, array]).cast(array.type)
+    assert expect == res.to_arrow()
+
+    result = binary_operation(scalar, scalar, op, array.type)
     assert result.is_scalar()  # if both inputs are scalar, the result is also
+
+
+operators = ["add", "sub", "mul", "and_", "or_", "eq", "ne", "lt", "le", "gt", "ge"]
+
+
+@pytest.mark.parametrize("op", operators)
+def test_binary_operation_polars(op):
+    pl = pytest.importorskip("polars")
+
+    a = gen_random_series(nelem=1000, num_nans=10)
+    b = gen_random_series(nelem=1000, num_nans=10)
+    if op in {"and_", "or_"}:
+        # and_ and or_ are bitwise, and require bool inputs.
+        a = a.cast("bool")
+        b = b.cast("bool")
+
+    a_s = pl.from_arrow(a)
+    b_s = pl.from_arrow(b)
+
+    # Need to work with a lazyframe, as there is no lazy series.
+    q = pl.LazyFrame({"a": a_s, "b": b_s}).with_columns(
+        a_b=getattr(operator, op)(pl.col("a"), pl.col("b"))
+    )
+    assert_matches_polars(q)
+
+
+@pytest.mark.parametrize("mode", ["none", "left", "right", "both"])
+def test_between_polars(mode):
+    pl = pytest.importorskip("polars")
+
+    a = gen_random_series(nelem=1000, num_nans=10)
+    b = gen_random_series(nelem=1000, num_nans=10)
+    c = gen_random_series(nelem=1000, num_nans=10)
+
+    a_s = pl.from_arrow(a)
+    b_s = pl.from_arrow(b)
+    c_s = pl.from_arrow(c)
+
+    q = pl.LazyFrame({"a": a_s, "b": b_s, "c": c_s}).with_columns(
+        pl.col("a").is_between(pl.col("b"), pl.col("c"), closed=mode)
+    )
+    assert_matches_polars(q)
